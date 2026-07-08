@@ -1,0 +1,39 @@
+# Build output
+build/
+out/
+cmake-build-*/
+
+# CMake
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Makefile
+*.vcxproj*
+*.sln
+.vs/
+
+# 실제 JT/NX 파일 (보안상 저장소에 포함 금지)
+*.jt
+*.prt
+*.x_t
+*.x_b
+*.stp
+*.step
+
+# SQLite 데이터 파일 (스키마 마이그레이션만 버전관리, 실 데이터는 제외)
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS/IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
