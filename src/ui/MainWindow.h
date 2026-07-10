@@ -2,9 +2,13 @@
 
 #include <QMainWindow>
 
+#include <memory>
+
+#include "geometry/IGeometryAdapter.h"
+
 namespace ui {
 
-// Phase1 UI 셸 — 레이아웃만 구성, 실제 기능(뷰어/규칙/DB 연동)은 이후 Phase에서 채운다.
+// Phase2: 중앙 영역은 MultiViewportPanel(Mock 데이터, 6개 인치)로 채워짐.
 // 개발계획_v2.md §10 UI 구조 참고: 좌측/중앙/우측/하단 4분할.
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -15,8 +19,10 @@ public:
 private:
     void setupLeftPanel();
     void setupRightPanel();
-    void setupCentralViewerPlaceholder();
+    void setupCentralViewer();
     void setupBottomTablePlaceholder();
+
+    std::unique_ptr<geometry::IGeometryAdapter> adapter_;
 };
 
 } // namespace ui

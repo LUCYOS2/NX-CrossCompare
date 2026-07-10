@@ -5,14 +5,21 @@
 #include <QListWidget>
 #include <QTableWidget>
 
+#include <string>
+#include <vector>
+
+#include "geometry/MockGeometryAdapter.h"
+#include "viewer/MultiViewportPanel.h"
+
 namespace ui {
 
-MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent) {
+MainWindow::MainWindow(QWidget* parent)
+    : QMainWindow(parent), adapter_(std::make_unique<geometry::MockGeometryAdapter>()) {
     setWindowTitle("NX CrossCompare");
 
     setupLeftPanel();
     setupRightPanel();
-    setupCentralViewerPlaceholder();
+    setupCentralViewer();
     setupBottomTablePlaceholder();
 }
 
@@ -32,10 +39,13 @@ void MainWindow::setupRightPanel() {
     addDockWidget(Qt::RightDockWidgetArea, dock);
 }
 
-void MainWindow::setupCentralViewerPlaceholder() {
-    auto* label = new QLabel("다중 Viewer 영역 (Phase2에서 구현)", this);
-    label->setAlignment(Qt::AlignCenter);
-    setCentralWidget(label);
+void MainWindow::setupCentralViewer() {
+    // Phase3에서 SQLite 프로젝트 데이터로 대체될 하드코딩 인치 목록
+    const std::vector<std::string> modelFiles = {
+        "43inch.jt", "50inch.jt", "55inch.jt", "65inch.jt", "75inch.jt", "85inch.jt"
+    };
+    auto* panel = new viewer::MultiViewportPanel(adapter_.get(), modelFiles, this);
+    setCentralWidget(panel);
 }
 
 void MainWindow::setupBottomTablePlaceholder() {

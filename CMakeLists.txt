@@ -13,18 +13,18 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets OpenGL)
 
 add_subdirectory(src/geometry)
+add_subdirectory(src/viewer)
 add_subdirectory(src/ui)
 # Phase 진행에 따라 서브모듈 추가 활성화
 # add_subdirectory(src/core)
 # add_subdirectory(src/rule)
-# add_subdirectory(src/viewer)
 # add_subdirectory(src/database)
 
 add_executable(nx_crosscompare src/main.cpp)
 target_link_libraries(nx_crosscompare PRIVATE ui geometry Qt6::Widgets)
 
 enable_testing()
-# add_subdirectory(src/tests)
+add_subdirectory(src/tests)
