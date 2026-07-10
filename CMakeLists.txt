@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(NXCrossCompare LANGUAGES CXX)
+project(NXCrossCompare LANGUAGES CXX C) # C: SQLite amalgamation(sqlite3.c) 컴파일용
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,12 +16,12 @@ set(CMAKE_AUTORCC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets OpenGL)
 
 add_subdirectory(src/geometry)
+add_subdirectory(src/rule)
+add_subdirectory(src/database)
 add_subdirectory(src/viewer)
 add_subdirectory(src/ui)
 # Phase 진행에 따라 서브모듈 추가 활성화
 # add_subdirectory(src/core)
-# add_subdirectory(src/rule)
-# add_subdirectory(src/database)
 
 add_executable(nx_crosscompare src/main.cpp)
 target_link_libraries(nx_crosscompare PRIVATE ui geometry Qt6::Widgets)
