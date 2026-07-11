@@ -2,6 +2,8 @@ add_library(geometry STATIC
     IGeometryAdapter.h
     MockGeometryAdapter.h
     MockGeometryAdapter.cpp
+    NxJtGeometryAdapter.h
+    NxJtGeometryAdapter.cpp
     AlignmentCheck.h
     AlignmentCheck.cpp
 )

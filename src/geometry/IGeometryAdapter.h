@@ -32,6 +32,16 @@ struct PlaneCandidate {
     Vec3 normal;
 };
 
+// face_to_face_gap 측정용 면 후보. Phase4b 초안: 실제 면 테셀레이션이 아니라
+// 중심점 + 법선벡터로 근사한다 (面 형상 전체가 아닌 대표점 기준 gap 계산).
+// 회사PC에서 실제 JT 테셀레이션 데이터가 들어오면 최단거리 탐색으로 교체 필요.
+struct FaceCandidate {
+    std::string faceType; // Rib_Top_Surface, Boss_Outer_Wall, ...
+    std::string partName;
+    Vec3 center;
+    Vec3 normal;
+};
+
 using ModelHandle = int;
 constexpr ModelHandle kInvalidModelHandle = -1;
 
@@ -51,6 +61,9 @@ public:
 
     virtual std::vector<PlaneCandidate> FindPlaneCandidates(
         ModelHandle handle, const std::string& planeType, const std::string& partName) const = 0;
+
+    virtual std::vector<FaceCandidate> FindFaceCandidates(
+        ModelHandle handle, const std::string& faceType, const std::string& partName) const = 0;
 };
 
 } // namespace geometry

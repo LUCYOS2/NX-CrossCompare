@@ -38,6 +38,22 @@ std::optional<std::pair<geometry::AnchorCandidate, geometry::AnchorCandidate>> R
     return std::nullopt;
 }
 
+std::optional<std::pair<geometry::FaceCandidate, geometry::FaceCandidate>> ResolveFacePair(
+    const std::vector<geometry::FaceCandidate>& candidatesA,
+    const std::vector<geometry::FaceCandidate>& candidatesB,
+    const std::vector<std::string>& selectors) {
+    if (std::find(selectors.begin(), selectors.end(), "nearest_face_pair") != selectors.end()) {
+        return SelectNearestFacePair(candidatesA, candidatesB);
+    }
+    if (std::find(selectors.begin(), selectors.end(), "parallel_face_pair") != selectors.end()) {
+        return SelectParallelFacePair(candidatesA, candidatesB);
+    }
+    if (candidatesA.size() == 1 && candidatesB.size() == 1) {
+        return std::make_pair(candidatesA.front(), candidatesB.front());
+    }
+    return std::nullopt;
+}
+
 double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
                             const Rule& rule) {
     switch (rule.measurementType) {
@@ -75,8 +91,18 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             }
             return ComputePointToPlaneDistance(resolved->position, planes.front().pointOnPlane, planes.front().normal);
         }
-        case MeasurementType::FaceToFaceGap:
-            throw std::runtime_error(rule.name + ": face_to_face_gap is implemented in Phase4b, not yet");
+        case MeasurementType::FaceToFaceGap: {
+            if (rule.anchors.size() != 2) {
+                throw std::runtime_error(rule.name + ": face_to_face_gap needs 2 anchors (face refs)");
+            }
+            const auto facesA = adapter.FindFaceCandidates(handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
+            const auto facesB = adapter.FindFaceCandidates(handle, rule.anchors[1].anchorType, rule.anchors[1].partName);
+            const auto pair = ResolveFacePair(facesA, facesB, rule.selector);
+            if (!pair) {
+                throw std::runtime_error(rule.name + ": failed to resolve face pair (ambiguous or no anti-parallel match)");
+            }
+            return ComputeFaceToFaceGap(pair->first, pair->second);
+        }
     }
     throw std::runtime_error(rule.name + ": unknown measurement type");
 }

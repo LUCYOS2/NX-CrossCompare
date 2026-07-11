@@ -67,6 +67,31 @@ std::vector<PlaneCandidate> GeneratePlaneCandidates(double halfD) {
     };
 }
 
+// 카탈로그 004(Rib-OpenCell Gap)/005(살두께) 검증용 후보. Phase4b 초안이라 실제
+// 테셀레이션 대신 중심점+법선으로 면을 근사한다 (FaceCandidate 주석 참고).
+std::vector<FaceCandidate> GenerateFaceCandidates(double scale) {
+    std::vector<FaceCandidate> candidates;
+
+    // 004. Rib-OpenCell Gap: nearest_face_pair. 정답 쌍은 gap=0.15mm 고정,
+    // 오답은 스케일된 먼 거리에 배치.
+    candidates.push_back({"Rib_Top_Surface", "Rib", {100.0 * scale, 0.0, 5.0}, {0.0, 0.0, 1.0}});
+    candidates.push_back({"Rib_Top_Surface", "Rib", {300.0 * scale, 0.0, 5.0}, {0.0, 0.0, 1.0}});
+
+    candidates.push_back({"OpenCell_Edge", "OpenCell", {100.0 * scale, 0.0, 5.15}, {0.0, 0.0, -1.0}});
+    candidates.push_back({"OpenCell_Edge", "OpenCell", {-250.0 * scale, 0.0, 5.0}, {0.0, 0.0, -1.0}});
+
+    // 005. 살두께: parallel_face_pair. 정답 쌍만 법선이 정반대(-1,0,0)/(1,0,0)이고
+    // 거리(살두께)=1.2mm 고정. 오답은 같은 위치라도 법선이 달라 anti-parallel
+    // 조건을 통과 못하게 배치 — selector가 거리가 아니라 법선 방향을 보는지 검증.
+    candidates.push_back({"Boss_Outer_Wall", "Boss", {50.0 * scale, 50.0 * scale, 0.0}, {1.0, 0.0, 0.0}});
+    candidates.push_back({"Boss_Outer_Wall", "Boss", {50.0 * scale, 50.0 * scale, 0.0}, {0.0, 1.0, 0.0}});
+
+    candidates.push_back({"Boss_Inner_Wall", "Boss", {50.0 * scale + 1.2, 50.0 * scale, 0.0}, {-1.0, 0.0, 0.0}});
+    candidates.push_back({"Boss_Inner_Wall", "Boss", {50.0 * scale, 50.0 * scale, 0.0}, {0.0, 1.0, 0.0}});
+
+    return candidates;
+}
+
 } // namespace
 
 ModelHandle MockGeometryAdapter::LoadModel(const std::string& filePath) {
@@ -90,6 +115,7 @@ ModelHandle MockGeometryAdapter::LoadModel(const std::string& filePath) {
     };
     model.anchorCandidates = GenerateAnchorCandidates(scale, halfD);
     model.planeCandidates = GeneratePlaneCandidates(halfD);
+    model.faceCandidates = GenerateFaceCandidates(scale);
 
     const ModelHandle handle = nextHandle_++;
     models_[handle] = std::move(model);
@@ -136,6 +162,21 @@ std::vector<PlaneCandidate> MockGeometryAdapter::FindPlaneCandidates(
     std::vector<PlaneCandidate> result;
     for (const auto& candidate : it->second.planeCandidates) {
         if (candidate.planeType == planeType && candidate.partName == partName) {
+            result.push_back(candidate);
+        }
+    }
+    return result;
+}
+
+std::vector<FaceCandidate> MockGeometryAdapter::FindFaceCandidates(
+    ModelHandle handle, const std::string& faceType, const std::string& partName) const {
+    auto it = models_.find(handle);
+    if (it == models_.end()) {
+        return {};
+    }
+    std::vector<FaceCandidate> result;
+    for (const auto& candidate : it->second.faceCandidates) {
+        if (candidate.faceType == faceType && candidate.partName == partName) {
             result.push_back(candidate);
         }
     }

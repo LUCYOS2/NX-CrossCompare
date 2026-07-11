@@ -19,6 +19,8 @@ public:
         ModelHandle handle, const std::string& anchorType, const std::string& partName) const override;
     std::vector<PlaneCandidate> FindPlaneCandidates(
         ModelHandle handle, const std::string& planeType, const std::string& partName) const override;
+    std::vector<FaceCandidate> FindFaceCandidates(
+        ModelHandle handle, const std::string& faceType, const std::string& partName) const override;
 
 private:
     struct MockModel {
@@ -26,6 +28,7 @@ private:
         std::vector<Vec3> vertices;
         std::vector<AnchorCandidate> anchorCandidates;
         std::vector<PlaneCandidate> planeCandidates;
+        std::vector<FaceCandidate> faceCandidates;
     };
 
     std::unordered_map<ModelHandle, MockModel> models_;

@@ -30,4 +30,8 @@ double ComputePointToPlaneDistance(
     return std::abs(dot / normalLength);
 }
 
+double ComputeFaceToFaceGap(const geometry::FaceCandidate& faceA, const geometry::FaceCandidate& faceB) {
+    return ComputePointToPlaneDistance(faceB.center, faceA.center, faceA.normal);
+}
+
 } // namespace rule

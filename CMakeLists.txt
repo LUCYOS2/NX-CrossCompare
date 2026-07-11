@@ -18,6 +18,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets OpenGL)
 add_subdirectory(src/geometry)
 add_subdirectory(src/rule)
 add_subdirectory(src/database)
+add_subdirectory(src/export)
 add_subdirectory(src/viewer)
 add_subdirectory(src/ui)
 # Phase 진행에 따라 서브모듈 추가 활성화

@@ -3,14 +3,20 @@
 #include <QBrush>
 #include <QColor>
 #include <QDockWidget>
+#include <QFileDialog>
 #include <QHeaderView>
 #include <QLabel>
 #include <QListWidget>
+#include <QMessageBox>
+#include <QPushButton>
 #include <QString>
 #include <QTableWidget>
 #include <QTableWidgetItem>
+#include <QVBoxLayout>
+#include <QWidget>
 
 #include <map>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -37,6 +43,8 @@ const std::vector<std::pair<int, std::string>>& InchModelList() {
 } // namespace
 
 MainWindow::MainWindow(QWidget* parent)
+    // 회사PC 전환 지점: geometry::MockGeometryAdapter -> geometry::NxJtGeometryAdapter로
+    // 교체하면 이 아래 UI/RuleEngine/DB 코드는 손대지 않고 그대로 재사용된다 (§9).
     : QMainWindow(parent), adapter_(std::make_unique<geometry::MockGeometryAdapter>()) {
     setWindowTitle("NX CrossCompare");
 
@@ -77,7 +85,7 @@ void MainWindow::setupComparisonTable() {
         handlesByInch[inch] = adapter_->LoadModel(file);
     }
 
-    const auto rules = rule::BuiltInPointRules();
+    const auto rules = rule::BuiltInRules();
 
     auto* table = new QTableWidget(static_cast<int>(rules.size()),
                                     static_cast<int>(handlesByInch.size()) + 1, this);
@@ -89,6 +97,7 @@ void MainWindow::setupComparisonTable() {
     table->setHorizontalHeaderLabels(headers);
     table->verticalHeader()->setVisible(false);
 
+    lastReports_.clear();
     for (size_t row = 0; row < rules.size(); ++row) {
         const auto& r = rules[row];
         table->setItem(static_cast<int>(row), 0, new QTableWidgetItem(QString::fromStdString(r.name)));
@@ -100,12 +109,37 @@ void MainWindow::setupComparisonTable() {
             item->setBackground(QBrush(result.withinTolerance ? QColor(200, 255, 200) : QColor(255, 200, 200)));
             table->setItem(static_cast<int>(row), static_cast<int>(col) + 1, item);
         }
+        lastReports_.push_back(report::RuleReport{r.name, results});
     }
     table->resizeColumnsToContents();
 
+    auto* exportButton = new QPushButton("Excel Export (CSV)", this);
+    connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportComparisonCsv);
+
+    auto* container = new QWidget(this);
+    auto* layout = new QVBoxLayout(container);
+    layout->addWidget(table);
+    layout->addWidget(exportButton);
+
     auto* dock = new QDockWidget("치수 비교 테이블", this);
-    dock->setWidget(table);
+    dock->setWidget(container);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
+}
+
+void MainWindow::exportComparisonCsv() {
+    const QString path = QFileDialog::getSaveFileName(this, "비교 결과 내보내기", "comparison_export.csv", "CSV (*.csv)");
+    if (path.isEmpty()) {
+        return;
+    }
+
+    try {
+        report::ExportComparisonCsv(path.toStdString(), lastReports_);
+        QMessageBox::information(this, "내보내기 완료",
+            "CSV로 저장했습니다:\n" + path +
+            "\n\n엑셀 서식이 필요하면 src/python/export_excel.py로 변환하세요.");
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, "내보내기 실패", QString::fromStdString(e.what()));
+    }
 }
 
 } // namespace ui

@@ -2,7 +2,7 @@
 
 namespace rule {
 
-std::vector<Rule> BuiltInPointRules() {
+std::vector<Rule> BuiltInRules() {
     std::vector<Rule> rules;
 
     // 001. Boss-Screw 체결 정렬 (docs/rule_catalog.md)
@@ -52,6 +52,39 @@ std::vector<Rule> BuiltInPointRules() {
         r.projection = "Z";
         r.tolerancePlusMm = 0.3;
         r.toleranceMinusMm = 0.1;
+        rules.push_back(r);
+    }
+
+    // 004. Rib-OpenCell Gap - selector: nearest_face_pair
+    {
+        Rule r;
+        r.name = "004. Rib-OpenCell Gap";
+        r.anchors = {
+            Anchor{"A", "Rib_Top_Surface", "Rib", std::nullopt, std::nullopt},
+            Anchor{"B", "OpenCell_Edge", "OpenCell", std::nullopt, std::nullopt},
+        };
+        r.referenceFrame = {"World_Origin"};
+        r.selector = {"nearest_face_pair"};
+        r.measurementType = MeasurementType::FaceToFaceGap;
+        r.tolerancePlusMm = 0.2;
+        r.toleranceMinusMm = 0.2;
+        rules.push_back(r);
+    }
+
+    // 005. 살두께 (Boss Root Wall Thickness) - selector: parallel_face_pair
+    {
+        Rule r;
+        r.name = "005. 살두께";
+        r.anchors = {
+            Anchor{"A", "Boss_Outer_Wall", "Boss", std::nullopt, std::nullopt},
+            Anchor{"B", "Boss_Inner_Wall", "Boss", std::nullopt, std::nullopt},
+        };
+        r.referenceFrame = {"World_Origin"};
+        r.selector = {"parallel_face_pair"};
+        r.measurementType = MeasurementType::FaceToFaceGap;
+        r.projection = "normal";
+        r.tolerancePlusMm = 0.05;
+        r.toleranceMinusMm = 0.05;
         rules.push_back(r);
     }
 

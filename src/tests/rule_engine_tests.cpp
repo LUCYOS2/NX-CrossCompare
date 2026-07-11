@@ -48,7 +48,7 @@ void TestNearestPairPicksTrueMatchAmongDistractors() {
 void TestBossScrewRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInPointRules();
+    const auto rules = rule::BuiltInRules();
     const auto& bossScrewRule = rules[0];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, bossScrewRule);
@@ -64,7 +64,7 @@ void TestBossScrewRuleAcrossInches() {
 void TestHookHeightRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInPointRules();
+    const auto rules = rule::BuiltInRules();
     const auto& hookHeightRule = rules[1];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, hookHeightRule);
@@ -77,13 +77,57 @@ void TestHookHeightRuleAcrossInches() {
 void TestHookCatchRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInPointRules();
+    const auto rules = rule::BuiltInRules();
     const auto& hookCatchRule = rules[2];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, hookCatchRule);
     for (const auto& r : results) {
         Check(std::abs(r.value - 0.2) < 1e-6, "Hook catch axis_projection(Z) should stay fixed at 0.2mm");
         Check(r.withinTolerance, "Hook catch should be within tolerance for every inch");
+    }
+}
+
+void TestRibOpenCellGapRuleAcrossInches() {
+    geometry::MockGeometryAdapter adapter;
+    const auto handles = LoadAllInches(adapter);
+    const auto rules = rule::BuiltInRules();
+    const auto& ribGapRule = rules[3];
+
+    const auto results = rule::RuleEngine::Evaluate(adapter, handles, ribGapRule);
+    for (const auto& r : results) {
+        Check(std::abs(r.value - 0.15) < 1e-6, "Rib-OpenCell gap should stay fixed at 0.15mm regardless of inch");
+        Check(r.withinTolerance, "Rib-OpenCell gap should be within tolerance for every inch");
+    }
+}
+
+void TestWallThicknessRuleAcrossInches() {
+    geometry::MockGeometryAdapter adapter;
+    const auto handles = LoadAllInches(adapter);
+    const auto rules = rule::BuiltInRules();
+    const auto& wallThicknessRule = rules[4];
+
+    const auto results = rule::RuleEngine::Evaluate(adapter, handles, wallThicknessRule);
+    for (const auto& r : results) {
+        Check(std::abs(r.value - 1.2) < 1e-6, "Wall thickness should stay fixed at 1.2mm regardless of inch");
+        Check(r.withinTolerance, "Wall thickness should be within tolerance for every inch");
+    }
+}
+
+void TestParallelFacePairRejectsNonAntiParallelCandidates() {
+    geometry::MockGeometryAdapter adapter;
+    const auto handle = adapter.LoadModel("55inch.jt");
+
+    const auto outerWalls = adapter.FindAnchorCandidates(handle, "Boss_Outer_Wall", "Boss");
+    Check(outerWalls.empty(), "Boss_Outer_Wall is a face, not an anchor - sanity check on FindAnchorCandidates");
+
+    const auto facesA = adapter.FindFaceCandidates(handle, "Boss_Outer_Wall", "Boss");
+    const auto facesB = adapter.FindFaceCandidates(handle, "Boss_Inner_Wall", "Boss");
+    Check(facesA.size() == 2 && facesB.size() == 2, "should generate 2 outer + 2 inner wall face candidates");
+
+    const auto pair = rule::SelectParallelFacePair(facesA, facesB);
+    Check(pair.has_value(), "parallel_face_pair should find the one anti-parallel pair");
+    if (pair) {
+        Check(std::abs(pair->first.normal.x - 1.0) < 1e-6, "should pick the outer wall facing +X, not the +Y distractor");
     }
 }
 
@@ -94,6 +138,9 @@ int main() {
     TestBossScrewRuleAcrossInches();
     TestHookHeightRuleAcrossInches();
     TestHookCatchRuleAcrossInches();
+    TestRibOpenCellGapRuleAcrossInches();
+    TestWallThicknessRuleAcrossInches();
+    TestParallelFacePairRejectsNonAntiParallelCandidates();
 
     if (g_failures == 0) {
         std::printf("All rule engine tests passed.\n");
