@@ -36,11 +36,20 @@ struct PointSample {
     double z = 0.0;
 };
 
+// point_to_plane 측정의 기준 평면 참조. anchors와 별개 필드로 둔 이유는 카탈로그
+// 002(후크 높이)처럼 "anchor 1개 + 기준 평면 1개" 형태가 anchor 2개 비교와
+// 성격이 달라서다 (개발계획_v2.md §6 참고).
+struct PlaneRef {
+    std::string planeType; // Datum_Plane 등
+    std::string partName;
+};
+
 // 개발계획_v2.md §7 Rule Schema. Anchor / Reference Frame / Selector / Measurement 4계층.
 struct Rule {
     int id = 0;
     std::string name;
     std::vector<Anchor> anchors;
+    std::optional<PlaneRef> referencePlane;  // measurementType == PointToPlane일 때만 사용
     std::vector<std::string> referenceFrame; // 우선순위 리스트, 1순위 = World_Origin (§5)
     std::vector<std::string> selector;       // 우선순위 리스트
     MeasurementType measurementType = MeasurementType::PointToPoint;

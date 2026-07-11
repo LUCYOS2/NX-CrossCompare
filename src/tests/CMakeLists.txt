@@ -5,3 +5,7 @@ add_test(NAME geometry_tests COMMAND geometry_tests)
 add_executable(rule_tests rule_tests.cpp)
 target_link_libraries(rule_tests PRIVATE rule database)
 add_test(NAME rule_tests COMMAND rule_tests)
+
+add_executable(rule_engine_tests rule_engine_tests.cpp)
+target_link_libraries(rule_engine_tests PRIVATE rule geometry)
+add_test(NAME rule_engine_tests COMMAND rule_engine_tests)

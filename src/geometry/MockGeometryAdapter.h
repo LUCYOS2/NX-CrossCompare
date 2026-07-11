@@ -15,10 +15,17 @@ public:
     BoundingBox GetBoundingBox(ModelHandle handle) const override;
     std::vector<Vec3> GetVertices(ModelHandle handle) const override;
 
+    std::vector<AnchorCandidate> FindAnchorCandidates(
+        ModelHandle handle, const std::string& anchorType, const std::string& partName) const override;
+    std::vector<PlaneCandidate> FindPlaneCandidates(
+        ModelHandle handle, const std::string& planeType, const std::string& partName) const override;
+
 private:
     struct MockModel {
         BoundingBox bounds;
         std::vector<Vec3> vertices;
+        std::vector<AnchorCandidate> anchorCandidates;
+        std::vector<PlaneCandidate> planeCandidates;
     };
 
     std::unordered_map<ModelHandle, MockModel> models_;

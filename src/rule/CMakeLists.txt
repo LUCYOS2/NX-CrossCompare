@@ -5,6 +5,12 @@ add_library(rule STATIC
     Measure.cpp
     SyntheticFixture.h
     SyntheticFixture.cpp
+    Selector.h
+    Selector.cpp
+    RuleEngine.h
+    RuleEngine.cpp
+    BuiltInCatalog.h
+    BuiltInCatalog.cpp
 )
 
 target_link_libraries(rule PUBLIC geometry)

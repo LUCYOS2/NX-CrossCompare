@@ -65,7 +65,9 @@ CREATE TABLE IF NOT EXISTS rules (
     measurement_type TEXT NOT NULL,
     projection TEXT NOT NULL,
     tolerance_plus_mm REAL NOT NULL,
-    tolerance_minus_mm REAL NOT NULL
+    tolerance_minus_mm REAL NOT NULL,
+    plane_type TEXT,      -- point_to_plane 전용, 그 외 측정 타입은 NULL
+    plane_part_name TEXT
 );
 
 CREATE TABLE IF NOT EXISTS rule_anchors (
@@ -141,13 +143,21 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
     {
         Stmt stmt(db_,
             "INSERT INTO rules (project_id, name, measurement_type, projection, "
-            "tolerance_plus_mm, tolerance_minus_mm) VALUES (?, ?, ?, ?, ?, ?);");
+            "tolerance_plus_mm, tolerance_minus_mm, plane_type, plane_part_name) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
         stmt.BindInt(1, projectId);
         stmt.BindText(2, r.name);
         stmt.BindText(3, ToString(r.measurementType));
         stmt.BindText(4, r.projection);
         stmt.BindDouble(5, r.tolerancePlusMm);
         stmt.BindDouble(6, r.toleranceMinusMm);
+        if (r.referencePlane.has_value()) {
+            stmt.BindText(7, r.referencePlane->planeType);
+            stmt.BindText(8, r.referencePlane->partName);
+        } else {
+            stmt.BindNull(7);
+            stmt.BindNull(8);
+        }
         stmt.Step();
         ruleId = static_cast<int>(stmt.LastInsertRowId());
     }
@@ -197,8 +207,8 @@ rule::Rule Database::LoadRule(int ruleId) {
 
     {
         Stmt stmt(db_,
-            "SELECT name, measurement_type, projection, tolerance_plus_mm, tolerance_minus_mm "
-            "FROM rules WHERE id = ?;");
+            "SELECT name, measurement_type, projection, tolerance_plus_mm, tolerance_minus_mm, "
+            "plane_type, plane_part_name FROM rules WHERE id = ?;");
         stmt.BindInt(1, ruleId);
         if (!stmt.Step()) {
             throw std::runtime_error("rule not found: id=" + std::to_string(ruleId));
@@ -208,6 +218,12 @@ rule::Rule Database::LoadRule(int ruleId) {
         r.projection = stmt.ColumnText(2);
         r.tolerancePlusMm = stmt.ColumnDouble(3);
         r.toleranceMinusMm = stmt.ColumnDouble(4);
+        if (!stmt.IsNull(5)) {
+            rule::PlaneRef planeRef;
+            planeRef.planeType = stmt.ColumnText(5);
+            planeRef.partName = stmt.ColumnText(6);
+            r.referencePlane = std::move(planeRef);
+        }
     }
 
     {
