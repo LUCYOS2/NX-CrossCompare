@@ -15,6 +15,11 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets OpenGL)
 
+# NxCadCore(공유 모듈, TV_BitSam과 공유) - 북마크 open + Assembly/Geometry 요약 읽기.
+# NxBackend(NX Open 의존)는 회사PC 전용이라 여기서는 NX 비의존 Core만 연결한다.
+# geometry::NxJtGeometryAdapter가 회사PC에서 이 라이브러리를 사용하게 될 예정.
+add_subdirectory(external/NxCadCore/CadImportModule/Core)
+
 add_subdirectory(src/geometry)
 add_subdirectory(src/rule)
 add_subdirectory(src/database)

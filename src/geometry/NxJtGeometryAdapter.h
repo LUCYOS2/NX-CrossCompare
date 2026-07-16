@@ -23,14 +23,25 @@ namespace geometry {
 //          FindFaceCandidates 담당. 이 anchor_type -> NX 질의 매핑 테이블 설계가
 //          회사PC 작업에서 가장 어렵고 중요한 부분이다.
 //
+// 1단계는 이미 만들어져 있다: external/NxCadCore(git submodule, TV_BitSam과 공유)의
+// CadImportModule이 정확히 "북마크 open -> Assembly Tree/요약 Geometry 읽기"를
+// 담당한다 (NxConnector::Connect(bookmarkPath), NxAssemblyReader, NxGeometryReader).
+// 회사PC에서는 이걸 새로 만들지 말고 그대로 갖다 쓸 것 — 자세한 경계는
+// external/NxCadCore/README.md, CadImportModule/README.md 참고.
+//
 // 회사PC 작업 순서(권장):
-//  1) third_party에 JT Open Toolkit/NX Open SDK 헤더·라이브러리 추가,
-//     CMakeLists.txt에 include/link 경로 연결 (find_package 또는 직접 경로 지정)
-//  2) LoadModel: 북마크 파일 파싱 -> 참조(경로/GUID) 추출 -> NX Open API로 실제
-//     파트/어셈블리 열기 (1단계)
-//  3) GetBoundingBox/GetVertices: 열린 구조의 테셀레이션 데이터에서 추출
+//  1) external/NxCadCore가 최신인지 확인(git submodule update --init --remote),
+//     CadImportModule/NxBackend가 필요로 하는 JT Open Toolkit/NX Open SDK 경로를
+//     Shared/NxOpenSdk.props 관례대로 맞춰서 빌드 가능하게 함
+//  2) LoadModel: NxCadCore의 NxConnector::Connect(bookmarkPath)로 북마크 열기 +
+//     NxAssemblyReader로 구조 읽기 (1단계 - 새로 구현할 필요 없음, 연결만)
+//  3) GetBoundingBox/GetVertices: NxGeometryReader의 요약 Geometry(BoundingBox 등)
+//     활용, 필요하면 NxCadCore에 기능 추가 요청/기여
 //  4) FindAnchorCandidates/FindPlaneCandidates/FindFaceCandidates: anchor_type ->
-//     NX Open API 질의 매핑 테이블 구현 (2단계, rule_catalog.md의 anchor_type
+//     NX Open API 질의 매핑 테이블 구현 (2단계 - 여기가 NX CrossCompare만의 새
+//     로직. NxCadCore의 NxConnector가 구현하는 Shared/NxContracts::INxSessionAccessor
+//     를 통해 세션에 접근하고, TV_BitSam의 RoiModule::NxRoiResolver와 같은 패턴으로
+//     NxConnector 구체 클래스에는 의존하지 않는다. rule_catalog.md의 anchor_type
 //     목록 기준으로 하나씩 채워나가면 됨)
 //  5) 실제 북마크 1개로 LoadModel ~ FindAnchorCandidates 왕복 테스트
 //  6) src/ui/MainWindow.cpp 생성자의 MockGeometryAdapter를 이 클래스로 교체

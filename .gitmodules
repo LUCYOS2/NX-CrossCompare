@@ -1,0 +1,3 @@
+[submodule "external/NxCadCore"]
+	path = external/NxCadCore
+	url = https://github.com/LUCYOS2/NxCadCore.git
