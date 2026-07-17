@@ -20,7 +20,10 @@ enum class MeasurementType {
     PointToPoint,
     PointToPlane,
     AxisProjection,
-    FaceToFaceGap
+    FaceToFaceGap,
+    // 전장 사이즈(X/Y/Z) - anchor/selector 탐색 없이 BoundingBox에서 직접 계산하는
+    // "기본 세팅" 항목. 다른 측정 타입과 성격이 달라 anchors가 비어있어도 된다.
+    OverallSize
 };
 
 std::string ToString(MeasurementType type);

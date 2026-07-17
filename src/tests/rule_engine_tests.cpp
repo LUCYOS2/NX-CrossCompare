@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <string>
 
 namespace {
 
@@ -49,7 +50,7 @@ void TestBossScrewRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
     const auto rules = rule::BuiltInRules();
-    const auto& bossScrewRule = rules[0];
+    const auto& bossScrewRule = rules[3];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, bossScrewRule);
     Check(results.size() == handles.size(), "should have one result per inch");
@@ -65,7 +66,7 @@ void TestHookHeightRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
     const auto rules = rule::BuiltInRules();
-    const auto& hookHeightRule = rules[1];
+    const auto& hookHeightRule = rules[4];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, hookHeightRule);
     for (const auto& r : results) {
@@ -78,7 +79,7 @@ void TestHookCatchRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
     const auto rules = rule::BuiltInRules();
-    const auto& hookCatchRule = rules[2];
+    const auto& hookCatchRule = rules[5];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, hookCatchRule);
     for (const auto& r : results) {
@@ -91,7 +92,7 @@ void TestRibOpenCellGapRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
     const auto rules = rule::BuiltInRules();
-    const auto& ribGapRule = rules[3];
+    const auto& ribGapRule = rules[6];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, ribGapRule);
     for (const auto& r : results) {
@@ -104,12 +105,37 @@ void TestWallThicknessRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
     const auto rules = rule::BuiltInRules();
-    const auto& wallThicknessRule = rules[4];
+    const auto& wallThicknessRule = rules[7];
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, wallThicknessRule);
     for (const auto& r : results) {
         Check(std::abs(r.value - 1.2) < 1e-6, "Wall thickness should stay fixed at 1.2mm regardless of inch");
         Check(r.withinTolerance, "Wall thickness should be within tolerance for every inch");
+    }
+}
+
+void TestOverallSizeRulesScaleWithInchExceptDepth() {
+    geometry::MockGeometryAdapter adapter;
+    const auto handles = LoadAllInches(adapter);
+    const auto rules = rule::BuiltInRules();
+    const auto& sizeX = rules[0];
+    const auto& sizeY = rules[1];
+    const auto& sizeZ = rules[2];
+
+    Check(sizeX.name.find("X") != std::string::npos, "rules[0] should be overall size X");
+    Check(sizeZ.name.find("Z") != std::string::npos, "rules[2] should be overall size Z");
+
+    const auto resultsX = rule::RuleEngine::Evaluate(adapter, handles, sizeX);
+    const auto resultsY = rule::RuleEngine::Evaluate(adapter, handles, sizeY);
+    const auto resultsZ = rule::RuleEngine::Evaluate(adapter, handles, sizeZ);
+
+    // MockGeometryAdapter: kBaseWidth=1230, kBaseHeight=710, kFixedDepth=45, kBaseInch=55
+    for (size_t i = 0; i < resultsX.size(); ++i) {
+        const double scale = static_cast<double>(resultsX[i].inch) / 55.0;
+        Check(std::abs(resultsX[i].value - 1230.0 * scale) < 1e-6, "overall size X should scale with inch ratio");
+        Check(std::abs(resultsY[i].value - 710.0 * scale) < 1e-6, "overall size Y should scale with inch ratio");
+        Check(std::abs(resultsZ[i].value - 45.0) < 1e-6, "overall size Z(depth) should stay fixed regardless of inch");
+        Check(resultsX[i].withinTolerance, "overall size should never be flagged as tolerance failure");
     }
 }
 
@@ -140,6 +166,7 @@ int main() {
     TestHookCatchRuleAcrossInches();
     TestRibOpenCellGapRuleAcrossInches();
     TestWallThicknessRuleAcrossInches();
+    TestOverallSizeRulesScaleWithInchExceptDepth();
     TestParallelFacePairRejectsNonAntiParallelCandidates();
 
     if (g_failures == 0) {

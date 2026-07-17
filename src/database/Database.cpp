@@ -138,6 +138,17 @@ int Database::CreateProject(const std::string& name) {
     return static_cast<int>(stmt.LastInsertRowId());
 }
 
+int Database::FindOrCreateProject(const std::string& name) {
+    {
+        Stmt stmt(db_, "SELECT id FROM projects WHERE name = ?;");
+        stmt.BindText(1, name);
+        if (stmt.Step()) {
+            return stmt.ColumnInt(0);
+        }
+    }
+    return CreateProject(name);
+}
+
 int Database::SaveRule(int projectId, const rule::Rule& r) {
     int ruleId = 0;
     {
@@ -263,6 +274,24 @@ rule::Rule Database::LoadRule(int ruleId) {
     }
 
     return r;
+}
+
+std::vector<rule::Rule> Database::LoadRulesForProject(int projectId) {
+    std::vector<int> ruleIds;
+    {
+        Stmt stmt(db_, "SELECT id FROM rules WHERE project_id = ? ORDER BY id;");
+        stmt.BindInt(1, projectId);
+        while (stmt.Step()) {
+            ruleIds.push_back(stmt.ColumnInt(0));
+        }
+    }
+
+    std::vector<rule::Rule> rules;
+    rules.reserve(ruleIds.size());
+    for (int id : ruleIds) {
+        rules.push_back(LoadRule(id));
+    }
+    return rules;
 }
 
 void Database::SavePoint(int ruleId, const rule::PointSample& point) {

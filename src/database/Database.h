@@ -23,9 +23,11 @@ public:
     void EnsureSchema();
 
     int CreateProject(const std::string& name);
+    int FindOrCreateProject(const std::string& name);
 
     int SaveRule(int projectId, const rule::Rule& r);
     rule::Rule LoadRule(int ruleId);
+    std::vector<rule::Rule> LoadRulesForProject(int projectId);
 
     void SavePoint(int ruleId, const rule::PointSample& point);
     std::vector<rule::PointSample> LoadPoints(int ruleId);

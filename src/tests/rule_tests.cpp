@@ -90,10 +90,35 @@ void TestRuleRoundTrip() {
     }
 }
 
+void TestFindOrCreateProjectAndLoadRulesForProject() {
+    database::Database db(":memory:");
+    db.EnsureSchema();
+
+    const int projectId1 = db.FindOrCreateProject("Default");
+    const int projectId2 = db.FindOrCreateProject("Default");
+    Check(projectId1 == projectId2, "FindOrCreateProject should return the same id for the same name");
+
+    const int otherProjectId = db.FindOrCreateProject("Other");
+    Check(otherProjectId != projectId1, "different project name should get a different id");
+
+    db.SaveRule(projectId1, BuildBossScrewRule());
+    auto secondRule = BuildBossScrewRule();
+    secondRule.name = "두 번째 규칙";
+    db.SaveRule(projectId1, secondRule);
+    db.SaveRule(otherProjectId, BuildBossScrewRule());
+
+    const auto rulesForProject1 = db.LoadRulesForProject(projectId1);
+    Check(rulesForProject1.size() == 2, "should load only the rules belonging to this project");
+
+    const auto rulesForOther = db.LoadRulesForProject(otherProjectId);
+    Check(rulesForOther.size() == 1, "other project should have its own single rule");
+}
+
 } // namespace
 
 int main() {
     TestRuleRoundTrip();
+    TestFindOrCreateProjectAndLoadRulesForProject();
 
     if (g_failures == 0) {
         std::printf("All rule/database tests passed.\n");

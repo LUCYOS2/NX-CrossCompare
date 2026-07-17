@@ -10,6 +10,7 @@ std::string ToString(MeasurementType type) {
         case MeasurementType::PointToPlane: return "point_to_plane";
         case MeasurementType::AxisProjection: return "axis_projection";
         case MeasurementType::FaceToFaceGap: return "face_to_face_gap";
+        case MeasurementType::OverallSize: return "overall_size";
     }
     throw std::invalid_argument("unknown MeasurementType");
 }
@@ -19,6 +20,7 @@ MeasurementType MeasurementTypeFromString(const std::string& s) {
     if (s == "point_to_plane") return MeasurementType::PointToPlane;
     if (s == "axis_projection") return MeasurementType::AxisProjection;
     if (s == "face_to_face_gap") return MeasurementType::FaceToFaceGap;
+    if (s == "overall_size") return MeasurementType::OverallSize;
     throw std::invalid_argument("unknown measurement_type: " + s);
 }
 

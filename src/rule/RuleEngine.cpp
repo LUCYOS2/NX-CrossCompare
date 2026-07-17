@@ -103,6 +103,14 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             }
             return ComputeFaceToFaceGap(pair->first, pair->second);
         }
+        case MeasurementType::OverallSize: {
+            // anchor/selector 탐색 없이 BoundingBox에서 직접 계산 (§전장 사이즈 - 기본 세팅 항목)
+            const auto box = adapter.GetBoundingBox(handle);
+            if (rule.projection == "X") return box.max.x - box.min.x;
+            if (rule.projection == "Y") return box.max.y - box.min.y;
+            if (rule.projection == "Z") return box.max.z - box.min.z;
+            throw std::runtime_error(rule.name + ": overall_size requires projection X/Y/Z, got: " + rule.projection);
+        }
     }
     throw std::runtime_error(rule.name + ": unknown measurement type");
 }
@@ -126,8 +134,11 @@ std::vector<InchResult> RuleEngine::Evaluate(
         result.inch = inch;
         result.value = value;
         result.deltaFromBaseline = value - *baseline;
-        result.withinTolerance =
-            result.deltaFromBaseline <= rule.tolerancePlusMm && result.deltaFromBaseline >= -rule.toleranceMinusMm;
+        // 전장 사이즈는 인치마다 다른 게 정상(설계 의도)이라 공차 판정 자체가 의미 없음 -
+        // 값/편차는 그대로 보여주되 pass/fail 표시는 하지 않는다.
+        result.withinTolerance = rule.measurementType == MeasurementType::OverallSize
+            ? true
+            : (result.deltaFromBaseline <= rule.tolerancePlusMm && result.deltaFromBaseline >= -rule.toleranceMinusMm);
         results.push_back(result);
     }
 

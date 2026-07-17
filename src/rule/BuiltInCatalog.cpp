@@ -5,6 +5,17 @@ namespace rule {
 std::vector<Rule> BuiltInRules() {
     std::vector<Rule> rules;
 
+    // 000. 전장 사이즈 (X/Y/Z) - 기본 세팅 항목. anchor 탐색 없이 BoundingBox로 직접 계산.
+    // 인치마다 값이 다른 게 정상이라 공차 판정은 하지 않는다 (RuleEngine::Evaluate 참고).
+    for (const std::string& axis : {"X", "Y", "Z"}) {
+        Rule r;
+        r.name = "000. 전장 사이즈 (" + axis + ")";
+        r.referenceFrame = {"World_Origin"};
+        r.measurementType = MeasurementType::OverallSize;
+        r.projection = axis;
+        rules.push_back(r);
+    }
+
     // 001. Boss-Screw 체결 정렬 (docs/rule_catalog.md)
     {
         Rule r;
