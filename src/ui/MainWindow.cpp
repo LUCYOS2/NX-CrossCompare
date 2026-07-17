@@ -1,12 +1,16 @@
 #include "ui/MainWindow.h"
 
+#include <QAction>
 #include <QBrush>
 #include <QColor>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QFileDialog>
 #include <QHeaderView>
-#include <QLabel>
 #include <QListWidget>
+#include <QMenu>
+#include <QMenuBar>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QString>
@@ -54,36 +58,27 @@ MainWindow::MainWindow(QWidget* parent)
     db_.EnsureSchema();
     projectId_ = db_.FindOrCreateProject("Default");
 
-    setupLeftPanel();
-    setupRightPanel();
+    setupMenuBar();
     setupCentralViewer();
     setupComparisonTable();
 }
 
-void MainWindow::setupLeftPanel() {
-    auto* dock = new QDockWidget("프로젝트 / 규칙 관리", this);
-    auto* container = new QWidget(dock);
-    auto* layout = new QVBoxLayout(container);
+void MainWindow::setupMenuBar() {
+    // 좌/우 도킹 패널에 있던 메뉴를 전부 상단 메뉴바 한 줄로 통합 - 뷰어(도면) 영역을
+    // 최대한 넓게 쓰기 위함. 평소엔 접혀있다가 클릭하면 펼쳐지는 메뉴바 특성을 활용.
+    auto* bar = menuBar();
 
-    auto* list = new QListWidget(container);
-    list->addItems({"프로젝트", "규칙 관리", "화면 설정", "가져오기/내보내기", "옵션"});
+    bar->addMenu("프로젝트");
 
-    auto* addRuleButton = new QPushButton("+ 새 규칙 추가", container);
-    connect(addRuleButton, &QPushButton::clicked, this, &MainWindow::onAddRuleClicked);
+    auto* ruleMenu = bar->addMenu("규칙 관리");
+    auto* addRuleAction = ruleMenu->addAction("+ 새 규칙 추가");
+    connect(addRuleAction, &QAction::triggered, this, &MainWindow::onAddRuleClicked);
 
-    layout->addWidget(list);
-    layout->addWidget(addRuleButton);
-
-    dock->setWidget(container);
-    addDockWidget(Qt::LeftDockWidgetArea, dock);
-}
-
-void MainWindow::setupRightPanel() {
-    auto* dock = new QDockWidget("포인트 / 규칙", this);
-    auto* list = new QListWidget(dock);
-    list->addItems({"포인트 그룹", "포인트 검색", "규칙 관리"});
-    dock->setWidget(list);
-    addDockWidget(Qt::RightDockWidgetArea, dock);
+    bar->addMenu("화면 설정");
+    bar->addMenu("가져오기/내보내기");
+    bar->addMenu("옵션");
+    bar->addMenu("포인트 그룹");
+    bar->addMenu("포인트 검색");
 }
 
 void MainWindow::setupCentralViewer() {
@@ -98,6 +93,8 @@ void MainWindow::setupCentralViewer() {
 void MainWindow::setupComparisonTable() {
     comparisonTable_ = new QTableWidget(this);
     comparisonTable_->verticalHeader()->setVisible(false);
+    connect(comparisonTable_->horizontalHeader(), &QHeaderView::sectionClicked, this,
+            &MainWindow::onRuleHeaderClicked);
 
     auto* exportButton = new QPushButton("Excel Export (CSV)", this);
     connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportComparisonCsv);
@@ -110,6 +107,8 @@ void MainWindow::setupComparisonTable() {
     auto* dock = new QDockWidget("치수 비교 테이블", this);
     dock->setWidget(container);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
+    // 시인성을 위해 기본 높이를 넉넉하게 확보 (사용자가 나중에 드래그로 조절 가능)
+    resizeDocks({dock}, {320}, Qt::Vertical);
 
     refreshComparisonTable();
 }
@@ -121,16 +120,24 @@ void MainWindow::refreshComparisonTable() {
     }
 
     // 내장 규칙(기본 세팅) + 사용자가 추가한 규칙(DB 저장) 순서로 합쳐서 보여준다.
-    auto rules = rule::BuiltInRules();
+    // "규칙" 헤더 클릭으로 숨긴 항목(hiddenRuleNames_)은 제외한다.
+    auto allRules = rule::BuiltInRules();
     const auto userRules = db_.LoadRulesForProject(projectId_);
-    rules.insert(rules.end(), userRules.begin(), userRules.end());
+    allRules.insert(allRules.end(), userRules.begin(), userRules.end());
+
+    std::vector<rule::Rule> rules;
+    for (auto& r : allRules) {
+        if (hiddenRuleNames_.find(r.name) == hiddenRuleNames_.end()) {
+            rules.push_back(r);
+        }
+    }
 
     comparisonTable_->clear();
     comparisonTable_->setRowCount(static_cast<int>(rules.size()));
     comparisonTable_->setColumnCount(static_cast<int>(handlesByInch.size()) + 1);
 
     QStringList headers;
-    headers << "규칙";
+    headers << "규칙 ▾"; // 클릭하면 표시 항목을 고를 수 있다는 힌트
     for (const auto& [inch, handle] : handlesByInch) {
         headers << QString("%1\"").arg(inch);
     }
@@ -160,6 +167,48 @@ void MainWindow::refreshComparisonTable() {
         lastReports_.push_back(report::RuleReport{r.name, results});
     }
     comparisonTable_->resizeColumnsToContents();
+    comparisonTable_->horizontalHeader()->setStretchLastSection(true);
+}
+
+void MainWindow::onRuleHeaderClicked(int section) {
+    if (section != 0) {
+        return;
+    }
+
+    auto allRules = rule::BuiltInRules();
+    const auto userRules = db_.LoadRulesForProject(projectId_);
+    allRules.insert(allRules.end(), userRules.begin(), userRules.end());
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("표시할 항목 선택");
+    auto* layout = new QVBoxLayout(&dialog);
+
+    auto* list = new QListWidget(&dialog);
+    for (const auto& r : allRules) {
+        auto* item = new QListWidgetItem(QString::fromStdString(r.name), list);
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        const bool visible = hiddenRuleNames_.find(r.name) == hiddenRuleNames_.end();
+        item->setCheckState(visible ? Qt::Checked : Qt::Unchecked);
+    }
+    layout->addWidget(list);
+
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    hiddenRuleNames_.clear();
+    for (int i = 0; i < list->count(); ++i) {
+        const auto* item = list->item(i);
+        if (item->checkState() == Qt::Unchecked) {
+            hiddenRuleNames_.insert(item->text().toStdString());
+        }
+    }
+    refreshComparisonTable();
 }
 
 void MainWindow::onAddRuleClicked() {
