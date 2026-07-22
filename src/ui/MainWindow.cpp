@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "geometry/MockGeometryAdapter.h"
+#include "geometry/NxJtGeometryAdapter.h"
 #include "rule/BuiltInCatalog.h"
 #include "rule/RuleEngine.h"
 #include "ui/RuleEditorDialog.h"
@@ -75,7 +76,11 @@ void MainWindow::setupMenuBar() {
     connect(addRuleAction, &QAction::triggered, this, &MainWindow::onAddRuleClicked);
 
     bar->addMenu("화면 설정");
-    bar->addMenu("가져오기/내보내기");
+
+    auto* importMenu = bar->addMenu("가져오기/내보내기");
+    auto* openBookmarkAction = importMenu->addAction("북마크(.plmxml) 열기");
+    connect(openBookmarkAction, &QAction::triggered, this, &MainWindow::onOpenBookmarkClicked);
+
     bar->addMenu("옵션");
     bar->addMenu("포인트 그룹");
     bar->addMenu("포인트 검색");
@@ -166,8 +171,12 @@ void MainWindow::refreshComparisonTable() {
         }
         lastReports_.push_back(report::RuleReport{r.name, results});
     }
-    comparisonTable_->resizeColumnsToContents();
-    comparisonTable_->horizontalHeader()->setStretchLastSection(true);
+    // 규칙 이름 칸(0)은 내용 길이에 맞추고, 인치 값 칸들은 서로 비교하기 쉽도록 폭을 통일한다.
+    comparisonTable_->resizeColumnToContents(0);
+    comparisonTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    for (int col = 1; col < comparisonTable_->columnCount(); ++col) {
+        comparisonTable_->horizontalHeader()->setSectionResizeMode(col, QHeaderView::Stretch);
+    }
 }
 
 void MainWindow::onRuleHeaderClicked(int section) {
@@ -223,6 +232,27 @@ void MainWindow::onAddRuleClicked() {
         refreshComparisonTable();
     } catch (const std::exception& e) {
         QMessageBox::critical(this, "규칙 저장 실패", QString::fromStdString(e.what()));
+    }
+}
+
+void MainWindow::onOpenBookmarkClicked() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, "북마크 열기", QString(), "PLMXML Bookmark (*.plmxml)");
+    if (path.isEmpty()) {
+        return;
+    }
+
+    // 어댑터를 실제 NX 연동 어댑터로 교체하고, 그 어댑터로 딱 이 북마크 하나만
+    // 담은 뷰포트 패널을 새로 만든다 - LoadModel은 MultiViewportPanel 생성자
+    // 내부에서 한 번만 호출되므로(중복 Connect 방지), 성공 여부는 예외로 판단한다.
+    auto realAdapter = std::make_unique<geometry::NxJtGeometryAdapter>();
+    try {
+        auto* panel = new viewer::MultiViewportPanel(realAdapter.get(), {path.toStdString()}, this);
+        adapter_ = std::move(realAdapter);
+        setCentralWidget(panel);
+        QMessageBox::information(this, "북마크 열기 성공", "북마크를 열었습니다:\n" + path);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, "북마크 열기 실패", QString::fromStdString(e.what()));
     }
 }
 

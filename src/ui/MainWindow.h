@@ -34,6 +34,7 @@ private slots:
     void exportComparisonCsv();
     void onAddRuleClicked();
     void onRuleHeaderClicked(int section);
+    void onOpenBookmarkClicked();
 
 private:
     void setupMenuBar();
