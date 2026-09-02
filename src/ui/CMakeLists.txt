@@ -3,6 +3,8 @@ add_library(ui STATIC
     MainWindow.cpp
     RuleEditorDialog.h
     RuleEditorDialog.cpp
+    ImportInchDialog.h
+    ImportInchDialog.cpp
 )
 
 target_link_libraries(ui PUBLIC Qt6::Widgets viewer rule export_lib database)

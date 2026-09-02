@@ -1,17 +1,24 @@
 #include "ui/MainWindow.h"
 
+#include <QAbstractItemView>
 #include <QAction>
+#include <QActionGroup>
 #include <QBrush>
 #include <QColor>
+#include <QDateTime>
 #include <QDialog>
+#include <QDebug>
 #include <QDialogButtonBox>
 #include <QDockWidget>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QHeaderView>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPixmap>
+#include <QProgressDialog>
 #include <QPushButton>
 #include <QString>
 #include <QTableWidget>
@@ -19,39 +26,28 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <algorithm>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "geometry/MockGeometryAdapter.h"
+#include "geometry/StepGeometryAdapter.h"
 #include "rule/BuiltInCatalog.h"
 #include "rule/RuleEngine.h"
+#include "ui/ImportInchDialog.h"
 #include "ui/RuleEditorDialog.h"
 #include "viewer/MultiViewportPanel.h"
 
 namespace ui {
 
-namespace {
-
-// Phase3에서 SQLite 프로젝트 데이터로 대체될 하드코딩 인치 목록.
-// (inch, 파일명) 쌍으로 둬서 중앙 Viewer와 하단 비교 테이블이 같은 인치 집합을 쓴다.
-const std::vector<std::pair<int, std::string>>& InchModelList() {
-    static const std::vector<std::pair<int, std::string>> kList = {
-        {43, "43inch.jt"}, {50, "50inch.jt"}, {55, "55inch.jt"},
-        {65, "65inch.jt"}, {75, "75inch.jt"}, {85, "85inch.jt"},
-    };
-    return kList;
-}
-
-} // namespace
-
 MainWindow::MainWindow(QWidget* parent)
-    // 회사PC 전환 지점: geometry::MockGeometryAdapter -> geometry::NxJtGeometryAdapter로
-    // 교체하면 이 아래 UI/RuleEngine/DB 코드는 손대지 않고 그대로 재사용된다 (§9).
+    // §17: STEP(.stp)을 OCCT로 직접 읽는 StepGeometryAdapter가 기본 경로. NX Open API
+    // 자동 연동(NxJtGeometryAdapter)은 §18 사유로 보류 - 스켈레톤은 그대로 남겨뒀고,
+    // 나중에 재개하면 여기 한 줄만 바꾸면 된다.
     : QMainWindow(parent),
-      adapter_(std::make_unique<geometry::MockGeometryAdapter>()),
+      adapter_(std::make_unique<geometry::StepGeometryAdapter>()),
       db_("nx_crosscompare.db") {
     setWindowTitle("NX CrossCompare");
 
@@ -74,27 +70,115 @@ void MainWindow::setupMenuBar() {
     auto* addRuleAction = ruleMenu->addAction("+ 새 규칙 추가");
     connect(addRuleAction, &QAction::triggered, this, &MainWindow::onAddRuleClicked);
 
-    bar->addMenu("화면 설정");
-    bar->addMenu("가져오기/내보내기");
+    auto* viewMenu = bar->addMenu("화면 설정");
+
+    // 1. 화면 모드: 전체 Solid / Solid-Edge / Wireframe. 3개 중 하나만 켜지는 배타적
+    // 그룹(QActionGroup) - 기본값은 기존 렌더링 동작과 동일한 Solid-Edge.
+    auto* renderModeGroup = new QActionGroup(this);
+    renderModeGroup->setExclusive(true);
+    auto* solidAction = viewMenu->addAction("Solid");
+    solidAction->setCheckable(true);
+    renderModeGroup->addAction(solidAction);
+    connect(solidAction, &QAction::triggered, this, [this]() {
+        currentRenderMode_ = viewer::RenderMode::Solid;
+        applyDisplaySettingsToCurrentPanel();
+    });
+
+    auto* solidEdgeAction = viewMenu->addAction("Solid-Edge");
+    solidEdgeAction->setCheckable(true);
+    solidEdgeAction->setChecked(true);
+    renderModeGroup->addAction(solidEdgeAction);
+    connect(solidEdgeAction, &QAction::triggered, this, [this]() {
+        currentRenderMode_ = viewer::RenderMode::SolidEdge;
+        applyDisplaySettingsToCurrentPanel();
+    });
+
+    auto* wireframeAction = viewMenu->addAction("Wireframe");
+    wireframeAction->setCheckable(true);
+    renderModeGroup->addAction(wireframeAction);
+    connect(wireframeAction, &QAction::triggered, this, [this]() {
+        currentRenderMode_ = viewer::RenderMode::Wireframe;
+        applyDisplaySettingsToCurrentPanel();
+    });
+
+    viewMenu->addSeparator();
+
+    // 2. 뷰포트 조작 모드: 여러 인치를 마우스로 동시에 조작(기본값, 기존 동작) vs
+    // 인치 하나만 독립적으로 조작. 배타적 그룹으로 둘 중 하나만 선택.
+    auto* manipulationGroup = new QActionGroup(this);
+    manipulationGroup->setExclusive(true);
+    auto* syncedAction = viewMenu->addAction("전체 동시 조작");
+    syncedAction->setCheckable(true);
+    syncedAction->setChecked(true);
+    manipulationGroup->addAction(syncedAction);
+    connect(syncedAction, &QAction::triggered, this, [this]() {
+        currentSyncedManipulation_ = true;
+        applyDisplaySettingsToCurrentPanel();
+    });
+
+    auto* independentAction = viewMenu->addAction("개별 인치 독립 조작");
+    independentAction->setCheckable(true);
+    manipulationGroup->addAction(independentAction);
+    connect(independentAction, &QAction::triggered, this, [this]() {
+        currentSyncedManipulation_ = false;
+        applyDisplaySettingsToCurrentPanel();
+    });
+
+    viewMenu->addSeparator();
+
+    // 3. 현재 뷰 화면을 이미지로 저장.
+    auto* captureAction = viewMenu->addAction("이미지로 저장...");
+    connect(captureAction, &QAction::triggered, this, &MainWindow::onCaptureImageClicked);
+
+    auto* importExportMenu = bar->addMenu("가져오기/내보내기");
+    auto* importStepAction = importExportMenu->addAction("STEP(.stp) 파일 불러오기...");
+    connect(importStepAction, &QAction::triggered, this, &MainWindow::onImportStepClicked);
+
     bar->addMenu("옵션");
     bar->addMenu("포인트 그룹");
     bar->addMenu("포인트 검색");
 }
 
 void MainWindow::setupCentralViewer() {
-    std::vector<std::string> modelFiles;
-    for (const auto& [inch, file] : InchModelList()) {
-        modelFiles.push_back(file);
+    // inchFiles_는 onImportStepClicked에서 이미 인치 오름차순(소형->대형)으로 정렬해
+    // 두므로, 여기서는 순서 그대로 그리드에 배치하면 된다. handle도 이미 로드된 것을
+    // 재사용 - 뷰어가 파일을 다시 파싱하지 않는다.
+    std::vector<std::pair<std::string, geometry::ModelHandle>> models;
+    for (const auto& entry : inchFiles_) {
+        const QString label = entry.inch > 0
+            ? QString("%1\"  %2").arg(entry.inch).arg(QFileInfo(QString::fromStdString(entry.filePath)).fileName())
+            : QFileInfo(QString::fromStdString(entry.filePath)).fileName();
+        models.push_back({label.toStdString(), entry.handle});
     }
-    auto* panel = new viewer::MultiViewportPanel(adapter_.get(), modelFiles, this);
+    auto* panel = new viewer::MultiViewportPanel(adapter_.get(), models, this);
     setCentralWidget(panel);
+    viewerPanel_ = panel;
+    applyDisplaySettingsToCurrentPanel();
+}
+
+void MainWindow::applyDisplaySettingsToCurrentPanel() {
+    if (!viewerPanel_) {
+        return;
+    }
+    viewerPanel_->setRenderMode(currentRenderMode_);
+    viewerPanel_->setSyncedManipulation(currentSyncedManipulation_);
 }
 
 void MainWindow::setupComparisonTable() {
     comparisonTable_ = new QTableWidget(this);
     comparisonTable_->verticalHeader()->setVisible(false);
+    // 이 테이블은 계산된 결과를 보여주기만 하는 읽기 전용 표시 - 편집 가능하게 두면
+    // 셀을 선택한 채로 키를 치면(예: 뷰어 단축키를 누르려다 포커스가 여기 있으면) 셀
+    // 편집 모드로 들어가버려서 값이 안 바뀌었는데 바뀐 것처럼 보이는 문제가 있었다.
+    comparisonTable_->setEditTriggers(QAbstractItemView::NoEditTriggers);
     connect(comparisonTable_->horizontalHeader(), &QHeaderView::sectionClicked, this,
             &MainWindow::onRuleHeaderClicked);
+    // resizeDocks({dock},{320},...)는 일회성 힌트라서 나중에 refreshComparisonTable()이
+    // 테이블 컬럼 수를 바꾸면(가져오기로 인치가 늘어날 때마다) 무시되고 도크가 3D 뷰어
+    // 공간을 거의 다 차지해버렸다(사용자 리포트: 도면이 안 보임 - 도크가 항상 이겼음).
+    // maximumHeight는 매 레이아웃 패스마다 강제되는 하드 제약이라 컬럼/행이 바뀌어도
+    // 계속 유지된다. 테이블 자체는 스크롤 가능한 뷰라 내용이 넘치면 스크롤바가 생긴다.
+    comparisonTable_->setMaximumHeight(260);
 
     auto* exportButton = new QPushButton("Excel Export (CSV)", this);
     connect(exportButton, &QPushButton::clicked, this, &MainWindow::exportComparisonCsv);
@@ -107,16 +191,17 @@ void MainWindow::setupComparisonTable() {
     auto* dock = new QDockWidget("치수 비교 테이블", this);
     dock->setWidget(container);
     addDockWidget(Qt::BottomDockWidgetArea, dock);
-    // 시인성을 위해 기본 높이를 넉넉하게 확보 (사용자가 나중에 드래그로 조절 가능)
-    resizeDocks({dock}, {320}, Qt::Vertical);
 
     refreshComparisonTable();
 }
 
 void MainWindow::refreshComparisonTable() {
     std::map<int, geometry::ModelHandle> handlesByInch;
-    for (const auto& [inch, file] : InchModelList()) {
-        handlesByInch[inch] = adapter_->LoadModel(file);
+    for (const auto& entry : inchFiles_) {
+        if (entry.inch <= 0) {
+            continue; // 인치 미지정 항목은 제외 - 목록/재입고 시 먼저 인치를 채워야 함
+        }
+        handlesByInch[entry.inch] = entry.handle; // onImportStepClicked에서 이미 로드된 handle 재사용
     }
 
     // 내장 규칙(기본 세팅) + 사용자가 추가한 규칙(DB 저장) 순서로 합쳐서 보여준다.
@@ -226,6 +311,74 @@ void MainWindow::onAddRuleClicked() {
     }
 }
 
+void MainWindow::onImportStepClicked() {
+    // 사용자 피드백 반영: 인치를 미리 지정하지 않고 여러 STEP 파일(예: 43/65/85 FRAME류)을
+    // 한번에 선택 -> 파일명에서 인치 자동인식(ImportInchDialog) -> 소형~대형 순 정렬.
+    // 파일당 LoadModel은 여기서 딱 한 번만 호출하고, 그 handle을 뷰어/비교표가 재사용한다
+    // (예전에는 검증/뷰어/비교표에서 각각 다시 파싱해 배치 업로드 시 그만큼 무거워졌었다).
+    const QStringList filePaths = QFileDialog::getOpenFileNames(
+        this, "STEP 파일 선택 (여러 개 선택 가능)", QString(), "STEP Files (*.stp *.step)");
+    if (filePaths.isEmpty()) {
+        return;
+    }
+
+    ImportInchDialog inchDialog(filePaths, this);
+    if (inchDialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const auto picked = inchDialog.Result(); // (inch, path) - 인치 오름차순, 미지정은 뒤
+
+    QProgressDialog progress("STEP 파일 불러오는 중...", "취소", 0, static_cast<int>(picked.size()), this);
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+
+    QStringList failures;
+    int done = 0;
+    for (const auto& [inch, path] : picked) {
+        progress.setLabelText(
+            QString("불러오는 중: %1").arg(QFileInfo(QString::fromStdString(path)).fileName()));
+        progress.setValue(done);
+        if (progress.wasCanceled()) {
+            break;
+        }
+
+        geometry::ModelHandle handle = geometry::kInvalidModelHandle;
+        try {
+            handle = adapter_->LoadModel(path);
+        } catch (const std::exception& e) {
+            failures << QString("%1: %2").arg(QString::fromStdString(path), QString::fromStdString(e.what()));
+            ++done;
+            continue;
+        }
+
+        // 같은 인치를 다시 불러오면 기존 항목을 교체(재입고). 미지정(inch<=0)은 항상 새로 추가.
+        auto it = std::find_if(inchFiles_.begin(), inchFiles_.end(), [inch](const LoadedInch& e) {
+            return inch > 0 && e.inch == inch;
+        });
+        if (it != inchFiles_.end()) {
+            *it = LoadedInch{inch, path, handle};
+        } else {
+            inchFiles_.push_back(LoadedInch{inch, path, handle});
+        }
+        ++done;
+    }
+    progress.setValue(static_cast<int>(picked.size()));
+
+    // 소형 -> 대형 순 정렬(요청사항) - 미지정(inch<=0)은 뒤로 보낸다.
+    std::stable_sort(inchFiles_.begin(), inchFiles_.end(), [](const LoadedInch& a, const LoadedInch& b) {
+        const int ka = a.inch <= 0 ? 100000 : a.inch;
+        const int kb = b.inch <= 0 ? 100000 : b.inch;
+        return ka < kb;
+    });
+
+    if (!failures.isEmpty()) {
+        QMessageBox::warning(this, "일부 파일 불러오기 실패", failures.join("\n"));
+    }
+
+    setupCentralViewer();
+    refreshComparisonTable();
+}
+
 void MainWindow::exportComparisonCsv() {
     const QString path = QFileDialog::getSaveFileName(this, "비교 결과 내보내기", "comparison_export.csv", "CSV (*.csv)");
     if (path.isEmpty()) {
@@ -240,6 +393,29 @@ void MainWindow::exportComparisonCsv() {
     } catch (const std::exception& e) {
         QMessageBox::critical(this, "내보내기 실패", QString::fromStdString(e.what()));
     }
+}
+
+// § 화면설정 - 현재 뷰(3D 뷰포트 그리드 + 단면 컨트롤 바)를 이미지로 저장.
+// QWidget::grab()은 자식 QOpenGLWidget의 GPU 렌더 결과도 Qt가 백킹스토어로 합성해서
+// 정확히 포함한다 - 뷰포트별로 따로 grabFramebuffer()를 호출해 이어붙일 필요가 없다.
+void MainWindow::onCaptureImageClicked() {
+    if (!viewerPanel_) {
+        return;
+    }
+    const QString defaultName =
+        "nx_crosscompare_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss") + ".png";
+    const QString path =
+        QFileDialog::getSaveFileName(this, "화면 이미지로 저장", defaultName, "PNG 이미지 (*.png)");
+    if (path.isEmpty()) {
+        return;
+    }
+
+    const QPixmap capture = viewerPanel_->grab();
+    if (!capture.save(path, "PNG")) {
+        QMessageBox::critical(this, "저장 실패", "이미지를 저장하지 못했습니다:\n" + path);
+        return;
+    }
+    QMessageBox::information(this, "저장 완료", "화면 이미지를 저장했습니다:\n" + path);
 }
 
 } // namespace ui
