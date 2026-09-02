@@ -19,3 +19,8 @@ target_include_directories(geometry PUBLIC ${CMAKE_SOURCE_DIR}/src)
 # OCCT include 경로는 geometry 라이브러리 내부(StepGeometryAdapter.cpp)에서만 필요하다.
 target_include_directories(geometry PRIVATE ${OpenCASCADE_INCLUDE_DIR})
 target_link_libraries(geometry PRIVATE ${OpenCASCADE_LIBRARIES})
+
+if(NX_OPEN_AVAILABLE)
+    target_compile_definitions(geometry PRIVATE NX_CROSSCOMPARE_HAS_NX_BACKEND)
+    target_link_libraries(geometry PRIVATE NxBackend NxCadCoreBase)
+endif()

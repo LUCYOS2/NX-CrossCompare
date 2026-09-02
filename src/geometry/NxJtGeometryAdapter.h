@@ -4,6 +4,13 @@
 
 #include <unordered_map>
 
+#ifdef NX_CROSSCOMPARE_HAS_NX_BACKEND
+#include <memory>
+
+namespace CadImport::Core { class ILogger; }
+namespace CadImport::NxBackend { class NxConnector; }
+#endif
+
 namespace geometry {
 
 // 회사PC 전용 실제 어댑터의 "착지점" 스켈레톤. 개인PC에는 JT Open Toolkit/NX Open
@@ -64,11 +71,17 @@ public:
 private:
     struct LoadedModel {
         std::string filePath;
+        BoundingBox bounds;
         // TODO(회사PC): JT 세션/문서 핸들, 테셀레이션 캐시 등을 여기에 보관
     };
 
     std::unordered_map<ModelHandle, LoadedModel> models_;
     ModelHandle nextHandle_ = 0;
+
+#ifdef NX_CROSSCOMPARE_HAS_NX_BACKEND
+    std::unique_ptr<CadImport::Core::ILogger> logger_;
+    std::unique_ptr<CadImport::NxBackend::NxConnector> connector_;
+#endif
 };
 
 } // namespace geometry

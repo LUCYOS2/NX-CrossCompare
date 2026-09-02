@@ -33,6 +33,7 @@
 #include <utility>
 #include <vector>
 
+#include "geometry/NxJtGeometryAdapter.h"
 #include "geometry/StepGeometryAdapter.h"
 #include "rule/BuiltInCatalog.h"
 #include "rule/RuleEngine.h"
@@ -133,6 +134,10 @@ void MainWindow::setupMenuBar() {
     auto* importExportMenu = bar->addMenu("가져오기/내보내기");
     auto* importStepAction = importExportMenu->addAction("STEP(.stp) 파일 불러오기...");
     connect(importStepAction, &QAction::triggered, this, &MainWindow::onImportStepClicked);
+    // §18(보류) - NX Open API 접근권한이 풀린 회사PC 한정 경로. §17(StepGeometryAdapter)이
+    // 기본이라 평소엔 이 메뉴를 몰라도 되지만, 재개 시점에 바로 쓸 수 있게 같이 둔다.
+    auto* openBookmarkAction = importExportMenu->addAction("북마크(.plmxml) 열기 (NX Open, 회사PC)");
+    connect(openBookmarkAction, &QAction::triggered, this, &MainWindow::onOpenBookmarkClicked);
 
     bar->addMenu("옵션");
     bar->addMenu("포인트 그룹");
@@ -251,8 +256,12 @@ void MainWindow::refreshComparisonTable() {
         }
         lastReports_.push_back(report::RuleReport{r.name, results});
     }
-    comparisonTable_->resizeColumnsToContents();
-    comparisonTable_->horizontalHeader()->setStretchLastSection(true);
+    // 규칙 이름 칸(0)은 내용 길이에 맞추고, 인치 값 칸들은 서로 비교하기 쉽도록 폭을 통일한다.
+    comparisonTable_->resizeColumnToContents(0);
+    comparisonTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
+    for (int col = 1; col < comparisonTable_->columnCount(); ++col) {
+        comparisonTable_->horizontalHeader()->setSectionResizeMode(col, QHeaderView::Stretch);
+    }
 }
 
 void MainWindow::onRuleHeaderClicked(int section) {
@@ -377,6 +386,39 @@ void MainWindow::onImportStepClicked() {
 
     setupCentralViewer();
     refreshComparisonTable();
+}
+
+// §18(보류) - 회사PC에서 NX Open API 접근권한이 풀리면 쓸 경로. 평소 기본 경로는
+// StepGeometryAdapter(§17)이고, 이 액션은 그 경로가 열렸을 때만 실제 북마크(.plmxml)를
+// NxJtGeometryAdapter로 직접 연다 - 어댑터 자체를 교체하므로 이후 STEP 재로드
+// (onImportStepClicked)와는 섞이지 않는다.
+void MainWindow::onOpenBookmarkClicked() {
+    const QString path = QFileDialog::getOpenFileName(
+        this, "북마크 열기", QString(), "PLMXML Bookmark (*.plmxml)");
+    if (path.isEmpty()) {
+        return;
+    }
+
+    // 어댑터를 실제 NX 연동 어댑터로 교체하고, 그 어댑터로 딱 이 북마크 하나만 담은
+    // 뷰포트 패널을 새로 만든다. §17 STEP 경로 전환 이후 MultiViewportPanel은 이미
+    // LoadModel까지 끝난 {라벨, handle} 목록을 받는 형태로 바뀌었으므로(중복 파싱 방지
+    // 목적, onImportStepClicked과 동일한 패턴), 여기서도 LoadModel을 먼저 호출한다.
+    auto realAdapter = std::make_unique<geometry::NxJtGeometryAdapter>();
+    try {
+        const geometry::ModelHandle handle = realAdapter->LoadModel(path.toStdString());
+        const std::vector<std::pair<std::string, geometry::ModelHandle>> models = {
+            {QFileInfo(path).fileName().toStdString(), handle}};
+        auto* panel = new viewer::MultiViewportPanel(realAdapter.get(), models, this);
+        adapter_ = std::move(realAdapter);
+        setCentralWidget(panel);
+        // setupCentralViewer()와 동일하게 화면설정(렌더모드/조작모드)을 새 패널에도
+        // 적용 - 안 하면 STEP 경로에서 고른 설정이 북마크 패널에는 안 먹는 것처럼 보인다.
+        viewerPanel_ = panel;
+        applyDisplaySettingsToCurrentPanel();
+        QMessageBox::information(this, "북마크 열기 성공", "북마크를 열었습니다:\n" + path);
+    } catch (const std::exception& e) {
+        QMessageBox::critical(this, "북마크 열기 실패", QString::fromStdString(e.what()));
+    }
 }
 
 void MainWindow::exportComparisonCsv() {
