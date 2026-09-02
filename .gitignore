@@ -1,7 +1,11 @@
 # Build output
 build/
+build_step/
 out/
 cmake-build-*/
+
+# vcpkg 매니페스트 설치 산출물 (external/vcpkg 자체는 submodule, 이 폴더만 로컬 산출물)
+vcpkg_installed/
 
 # CMake
 CMakeFiles/

@@ -64,6 +64,36 @@ public:
 
     virtual std::vector<FaceCandidate> FindFaceCandidates(
         ModelHandle handle, const std::string& faceType, const std::string& partName) const = 0;
+
+    // 뷰어가 실제 렌더링에 쓰는 삼각형 메시. 연속된 3개 Vec3가 삼각형 1개(flat 셰이딩,
+    // 별도 법선 데이터 없이 화면공간 미분(dFdx/dFdy)으로 면 법선을 계산). 실 형상
+    // 테셀레이션이 없는 어댑터(Mock, 미구현 NxJt)를 위해 바운딩박스 12삼각형 상자로
+    // 기본 구현을 제공한다 — StepGeometryAdapter는 OCCT 테셀레이션 결과로 override.
+    virtual std::vector<Vec3> GetRenderTriangles(ModelHandle handle) const {
+        const BoundingBox box = GetBoundingBox(handle);
+        const Vec3& lo = box.min;
+        const Vec3& hi = box.max;
+        const Vec3 corners[8] = {
+            {lo.x, lo.y, lo.z}, {hi.x, lo.y, lo.z}, {hi.x, hi.y, lo.z}, {lo.x, hi.y, lo.z},
+            {lo.x, lo.y, hi.z}, {hi.x, lo.y, hi.z}, {hi.x, hi.y, hi.z}, {lo.x, hi.y, hi.z},
+        };
+        constexpr int kFaces[6][4] = {
+            {0, 1, 2, 3}, {4, 5, 6, 7}, // 아래/윗면
+            {0, 1, 5, 4}, {2, 3, 7, 6}, // 앞/뒷면
+            {1, 2, 6, 5}, {3, 0, 4, 7}, // 옆면 2개
+        };
+        std::vector<Vec3> triangles;
+        triangles.reserve(6 * 6);
+        for (const auto& face : kFaces) {
+            triangles.push_back(corners[face[0]]);
+            triangles.push_back(corners[face[1]]);
+            triangles.push_back(corners[face[2]]);
+            triangles.push_back(corners[face[0]]);
+            triangles.push_back(corners[face[2]]);
+            triangles.push_back(corners[face[3]]);
+        }
+        return triangles;
+    }
 };
 
 } // namespace geometry

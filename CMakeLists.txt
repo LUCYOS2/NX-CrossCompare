@@ -1,3 +1,11 @@
+# vcpkg 매니페스트(vcpkg.json) 자동 연동 - external/vcpkg submodule을 project() 이전에
+# 툴체인으로 지정해야 vcpkg가 관리하는 패키지(OpenCASCADE 등)를 find_package로 찾을 수
+# 있다. 다른 툴체인을 이미 지정한 경우(-DCMAKE_TOOLCHAIN_FILE=...)는 그대로 존중한다.
+if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
+  set(CMAKE_TOOLCHAIN_FILE "${CMAKE_CURRENT_SOURCE_DIR}/external/vcpkg/scripts/buildsystems/vcpkg.cmake"
+      CACHE STRING "Vcpkg toolchain file")
+endif()
+
 cmake_minimum_required(VERSION 3.20)
 project(NXCrossCompare LANGUAGES CXX C) # C: SQLite amalgamation(sqlite3.c) 컴파일용
 
