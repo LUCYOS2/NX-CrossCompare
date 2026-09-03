@@ -42,7 +42,6 @@ private slots:
     void onRuleHeaderClicked(int section);
     void onImportStepClicked();
     void onCaptureImageClicked();
-    void onOpenBookmarkClicked();
 
 private:
     void setupMenuBar();
