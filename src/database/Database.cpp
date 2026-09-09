@@ -129,6 +129,20 @@ void Database::EnsureSchema() {
         sqlite3_free(errMsg);
         throw std::runtime_error("failed to create schema: " + msg);
     }
+
+    // rules.image_path - § 이미지 캡쳐 연동(2026-09-09)에서 추가된 컬럼. 기존에 만들어진
+    // DB 파일에는 없을 수 있어 CREATE TABLE IF NOT EXISTS만으로는 채워지지 않으므로
+    // 별도 마이그레이션이 필요하다. 이미 컬럼이 있으면 "duplicate column" 에러가 나는데
+    // 그건 정상 상황(이미 마이그레이션됨)이라 무시하고, 그 외 에러만 던진다.
+    char* migrateErr = nullptr;
+    if (sqlite3_exec(db_, "ALTER TABLE rules ADD COLUMN image_path TEXT;", nullptr, nullptr, &migrateErr) !=
+        SQLITE_OK) {
+        const std::string msg = migrateErr ? migrateErr : "unknown error";
+        sqlite3_free(migrateErr);
+        if (msg.find("duplicate column") == std::string::npos) {
+            throw std::runtime_error("failed to migrate rules.image_path: " + msg);
+        }
+    }
 }
 
 int Database::CreateProject(const std::string& name) {
@@ -154,8 +168,8 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
     {
         Stmt stmt(db_,
             "INSERT INTO rules (project_id, name, measurement_type, projection, "
-            "tolerance_plus_mm, tolerance_minus_mm, plane_type, plane_part_name) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
+            "tolerance_plus_mm, tolerance_minus_mm, plane_type, plane_part_name, image_path) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);");
         stmt.BindInt(1, projectId);
         stmt.BindText(2, r.name);
         stmt.BindText(3, ToString(r.measurementType));
@@ -168,6 +182,11 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
         } else {
             stmt.BindNull(7);
             stmt.BindNull(8);
+        }
+        if (r.imagePath.has_value() && !r.imagePath->empty()) {
+            stmt.BindText(9, *r.imagePath);
+        } else {
+            stmt.BindNull(9);
         }
         stmt.Step();
         ruleId = static_cast<int>(stmt.LastInsertRowId());
@@ -219,7 +238,7 @@ rule::Rule Database::LoadRule(int ruleId) {
     {
         Stmt stmt(db_,
             "SELECT name, measurement_type, projection, tolerance_plus_mm, tolerance_minus_mm, "
-            "plane_type, plane_part_name FROM rules WHERE id = ?;");
+            "plane_type, plane_part_name, image_path FROM rules WHERE id = ?;");
         stmt.BindInt(1, ruleId);
         if (!stmt.Step()) {
             throw std::runtime_error("rule not found: id=" + std::to_string(ruleId));
@@ -234,6 +253,9 @@ rule::Rule Database::LoadRule(int ruleId) {
             planeRef.planeType = stmt.ColumnText(5);
             planeRef.partName = stmt.ColumnText(6);
             r.referencePlane = std::move(planeRef);
+        }
+        if (!stmt.IsNull(7)) {
+            r.imagePath = stmt.ColumnText(7);
         }
     }
 
@@ -324,7 +346,7 @@ std::vector<rule::PointSample> Database::LoadPoints(int ruleId) {
 void Database::UpdateRule(int ruleId, const rule::Rule& r) {
     Stmt stmt(db_,
         "UPDATE rules SET name = ?, measurement_type = ?, projection = ?, "
-        "tolerance_plus_mm = ?, tolerance_minus_mm = ?, plane_type = ?, plane_part_name = ? "
+        "tolerance_plus_mm = ?, tolerance_minus_mm = ?, plane_type = ?, plane_part_name = ?, image_path = ? "
         "WHERE id = ?;");
     stmt.BindText(1, r.name);
     stmt.BindText(2, ToString(r.measurementType));
@@ -338,7 +360,12 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
         stmt.BindNull(6);
         stmt.BindNull(7);
     }
-    stmt.BindInt(8, ruleId);
+    if (r.imagePath.has_value() && !r.imagePath->empty()) {
+        stmt.BindText(8, *r.imagePath);
+    } else {
+        stmt.BindNull(8);
+    }
+    stmt.BindInt(9, ruleId);
     stmt.Step();
 
     // 자식 테이블(anchor/reference_frame/selector)은 개수·순서가 통째로 바뀔 수 있어서

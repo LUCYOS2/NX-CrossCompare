@@ -6,7 +6,9 @@
 #include <QAbstractItemView>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QDateTime>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QHBoxLayout>
@@ -14,6 +16,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPixmap>
 #include <QPushButton>
 #include <QTableWidget>
 #include <QTableWidgetItem>
@@ -21,13 +24,18 @@
 
 namespace ui {
 
+namespace {
+constexpr int kImagePreviewWidth = 240;
+constexpr int kImagePreviewHeight = 135;
+} // namespace
+
 RuleEditorDialog::RuleEditorDialog(
     database::Database* db, int projectId, geometry::IGeometryAdapter* adapter,
     viewer::MultiViewportPanel* viewerPanel,
     const std::vector<std::pair<std::string, geometry::ModelHandle>>& models, QWidget* parent)
     : QDialog(parent), db_(db), projectId_(projectId), adapter_(adapter), models_(models) {
     setWindowTitle("규칙 관리");
-    resize(680, 860);
+    resize(680, 920);
 
     table_ = new QTableWidget(this);
     table_->setColumnCount(2);
@@ -50,7 +58,7 @@ RuleEditorDialog::RuleEditorDialog(
     measurementType_->addItems({"point_to_point", "point_to_plane", "axis_projection", "face_to_face_gap",
                                  "instance_count", "min_pitch"});
 
-    // Anchor A: 형상타입 입력칸 + "검색..."(텍스트 기반, AnchorSearchDialog) +
+    // 포인트 A: 형상타입 입력칸 + "검색..."(텍스트 기반, AnchorSearchDialog) +
     // "지정..."(3D 클릭 피킹) - 클릭하기 쉬우면 지정을, 겹쳐 있어 찾기 어려우면
     // 검색을 쓰라고 둘 다 남겨뒀다.
     anchorAType_ = new QLineEdit(this);
@@ -70,6 +78,11 @@ RuleEditorDialog::RuleEditorDialog(
     anchorARowLayout->addWidget(searchAButton_);
     anchorARowLayout->addWidget(pickAButton_);
 
+    // 포인트 B: 예전엔 원통 전용 "Anchor B"와 평면 전용 "기준평면"이 측정타입에 따라
+    // 서로 다른 입력칸으로 갈렸는데, 지금은 하나로 합쳤다 - 원통을 찍으면 point 값으로,
+    // 평면을 찍으면 기준평면으로 쓰인다(둘 중 뭐가 뭔지는 pickedAKind_/pickedBKind_로
+    // 기억해뒀다가 BuildRule()이 판단). instance_count/min_pitch처럼 포인트가 하나뿐인
+    // 측정타입일 땐 이 그룹 전체를 숨긴다(onMeasurementTypeChanged).
     anchorBGroup_ = new QWidget(this);
     anchorBType_ = new QLineEdit(anchorBGroup_);
     anchorBPart_ = new QLineEdit(anchorBGroup_);
@@ -89,25 +102,24 @@ RuleEditorDialog::RuleEditorDialog(
     anchorBRowLayout->addWidget(pickBButton_);
     auto* anchorBLayout = new QFormLayout(anchorBGroup_);
     anchorBLayout->setContentsMargins(0, 0, 0, 0);
-    anchorBLayout->addRow("Anchor B 형상타입", anchorBRow);
-    anchorBLayout->addRow("Anchor B 부품명", anchorBPart_);
-    anchorBLayout->addRow("Anchor B 지름", anchorBDiameter_);
+    anchorBLayout->addRow("포인트 B 형상타입", anchorBRow);
+    anchorBLayout->addRow("포인트 B 부품명", anchorBPart_);
+    anchorBLayout->addRow("포인트 B 지름", anchorBDiameter_);
 
-    // 기준평면은 검색(AnchorSearchDialog)이 아직 원통면만 다뤄서 "지정..."만 둔다.
-    planeRefGroup_ = new QWidget(this);
-    planeType_ = new QLineEdit(planeRefGroup_);
-    planePart_ = new QLineEdit(planeRefGroup_);
-    pickPlaneButton_ = new QPushButton("지정...", planeRefGroup_);
-    connect(pickPlaneButton_, &QPushButton::clicked, this, &RuleEditorDialog::onPickPlaneClicked);
-    auto* planeTypeRow = new QWidget(planeRefGroup_);
-    auto* planeTypeRowLayout = new QHBoxLayout(planeTypeRow);
-    planeTypeRowLayout->setContentsMargins(0, 0, 0, 0);
-    planeTypeRowLayout->addWidget(planeType_, 1);
-    planeTypeRowLayout->addWidget(pickPlaneButton_);
-    auto* planeLayout = new QFormLayout(planeRefGroup_);
-    planeLayout->setContentsMargins(0, 0, 0, 0);
-    planeLayout->addRow("기준평면 타입", planeTypeRow);
-    planeLayout->addRow("기준평면 부품명", planePart_);
+    // § 이미지 캡쳐 연동 - 규칙별로 측정 포인트 그림을 남겨 CTQ 관리서처럼 쓸 수 있게.
+    imagePreviewLabel_ = new QLabel(this);
+    imagePreviewLabel_->setFixedSize(kImagePreviewWidth, kImagePreviewHeight);
+    imagePreviewLabel_->setStyleSheet("border: 1px solid #bbb; background: #f5f5f5; color: #888;");
+    imagePreviewLabel_->setAlignment(Qt::AlignCenter);
+    imagePreviewLabel_->setText("저장된 이미지 없음");
+    captureImageButton_ = new QPushButton("현재 화면 캡쳐", this);
+    connect(captureImageButton_, &QPushButton::clicked, this, &RuleEditorDialog::onCaptureRuleImageClicked);
+    auto* imageRow = new QWidget(this);
+    auto* imageRowLayout = new QHBoxLayout(imageRow);
+    imageRowLayout->setContentsMargins(0, 0, 0, 0);
+    imageRowLayout->addWidget(imagePreviewLabel_);
+    imageRowLayout->addWidget(captureImageButton_);
+    imageRowLayout->addStretch(1);
 
     selector_ = new QComboBox(this);
     selector_->addItems(
@@ -128,12 +140,12 @@ RuleEditorDialog::RuleEditorDialog(
 
     auto* form = new QFormLayout();
     form->addRow("규칙 이름", name_);
+    form->addRow("측정 이미지", imageRow);
     form->addRow("측정 타입", measurementType_);
-    form->addRow("Anchor A 형상타입", anchorARow);
-    form->addRow("Anchor A 부품명", anchorAPart_);
-    form->addRow("Anchor A 지름", anchorADiameter_);
+    form->addRow("포인트 A 형상타입", anchorARow);
+    form->addRow("포인트 A 부품명", anchorAPart_);
+    form->addRow("포인트 A 지름", anchorADiameter_);
     form->addRow(anchorBGroup_);
-    form->addRow(planeRefGroup_);
     form->addRow("Selector", selector_);
     form->addRow("Projection", projection_);
     form->addRow("공차 +", tolerancePlus_);
@@ -156,6 +168,7 @@ RuleEditorDialog::RuleEditorDialog(
 
     connect(measurementType_, &QComboBox::currentIndexChanged, this, &RuleEditorDialog::onMeasurementTypeChanged);
     onMeasurementTypeChanged(measurementType_->currentIndex());
+    UpdateImagePreview();
 
     RewireViewerPanel(viewerPanel);
     refreshTable();
@@ -203,23 +216,23 @@ void RuleEditorDialog::resetForm() {
     anchorBType_->clear();
     anchorBPart_->clear();
     anchorBDiameter_->setValue(0.0);
-    planeType_->clear();
-    planePart_->clear();
     selector_->setCurrentIndex(0);
     projection_->setCurrentIndex(0);
     tolerancePlus_->setValue(0.0);
     toleranceMinus_->setValue(0.0);
     table_->clearSelection();
+    pickedAKind_ = geometry::PickedFaceKind::None;
+    pickedBKind_ = geometry::PickedFaceKind::None;
+    ruleImagePath_.clear();
+    UpdateImagePreview();
 }
 
 void RuleEditorDialog::onMeasurementTypeChanged(int index) {
     const QString type = measurementType_->itemText(index);
-    const bool isPointToPlane = (type == "point_to_plane");
-    // instance_count/min_pitch는 anchor 1개만 쓴다(짝을 짓지 않음) - point_to_plane과
-    // 마찬가지로 Anchor B는 필요 없지만, 기준평면도 필요 없다는 점이 다르다.
-    const bool isSingleAnchorNoPlane = (type == "instance_count" || type == "min_pitch");
-    anchorBGroup_->setVisible(!isPointToPlane && !isSingleAnchorNoPlane);
-    planeRefGroup_->setVisible(isPointToPlane);
+    // instance_count/min_pitch는 포인트 1개만 쓴다(짝을 짓지 않음) - 그 외(point_to_point/
+    // point_to_plane/axis_projection/face_to_face_gap)는 전부 포인트 B가 필요하다.
+    const bool isSingleAnchor = (type == "instance_count" || type == "min_pitch");
+    anchorBGroup_->setVisible(!isSingleAnchor);
 }
 
 void RuleEditorDialog::onRowClicked(int row) {
@@ -232,6 +245,13 @@ void RuleEditorDialog::onRowClicked(int row) {
 }
 
 void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
+    // DB에는 피킹된 형상 종류가 저장되지 않으므로, 기존 규칙을 불러올 땐 항상 모른다고
+    // 취급한다 - 재추론은 사용자가 다시 클릭으로 찍어야 일어난다.
+    pickedAKind_ = geometry::PickedFaceKind::None;
+    pickedBKind_ = geometry::PickedFaceKind::None;
+    ruleImagePath_ = r.imagePath.value_or(std::string());
+    UpdateImagePreview();
+
     name_->setText(QString::fromStdString(r.name));
     measurementType_->setCurrentText(QString::fromStdString(rule::ToString(r.measurementType)));
 
@@ -245,7 +265,13 @@ void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
         anchorADiameter_->setValue(0.0);
     }
 
-    if (r.anchors.size() > 1) {
+    // 포인트 B 입력칸은 "두 번째 anchor" 또는 "referencePlane" 둘 중 있는 쪽을 보여준다
+    // (point_to_plane은 referencePlane만 있고 anchors는 1개뿐이라 서로 배타적).
+    if (r.measurementType == rule::MeasurementType::PointToPlane && r.referencePlane.has_value()) {
+        anchorBType_->setText(QString::fromStdString(r.referencePlane->planeType));
+        anchorBPart_->setText(QString::fromStdString(r.referencePlane->partName));
+        anchorBDiameter_->setValue(0.0);
+    } else if (r.anchors.size() > 1) {
         anchorBType_->setText(QString::fromStdString(r.anchors[1].anchorType));
         anchorBPart_->setText(QString::fromStdString(r.anchors[1].partName));
         anchorBDiameter_->setValue(r.anchors[1].paramValue.value_or(0.0));
@@ -253,14 +279,6 @@ void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
         anchorBType_->clear();
         anchorBPart_->clear();
         anchorBDiameter_->setValue(0.0);
-    }
-
-    if (r.referencePlane.has_value()) {
-        planeType_->setText(QString::fromStdString(r.referencePlane->planeType));
-        planePart_->setText(QString::fromStdString(r.referencePlane->partName));
-    } else {
-        planeType_->clear();
-        planePart_->clear();
     }
 
     selector_->setCurrentText(r.selector.empty() ? "(없음)" : QString::fromStdString(r.selector.front()));
@@ -279,36 +297,64 @@ rule::Rule RuleEditorDialog::BuildRule() const {
     r.name = name_->text().toStdString();
     r.measurementType = rule::MeasurementTypeFromString(measurementType_->currentText().toStdString());
     r.referenceFrame = {"World_Origin"};
+    if (!ruleImagePath_.empty()) {
+        r.imagePath = ruleImagePath_;
+    }
 
     const bool isPointToPlane = r.measurementType == rule::MeasurementType::PointToPlane;
-    const bool isSingleAnchorNoPlane = r.measurementType == rule::MeasurementType::InstanceCount ||
-                                        r.measurementType == rule::MeasurementType::MinPitch;
+    const bool isSingleAnchor = r.measurementType == rule::MeasurementType::InstanceCount ||
+                                 r.measurementType == rule::MeasurementType::MinPitch;
 
-    rule::Anchor anchorA;
-    anchorA.role = (isPointToPlane || isSingleAnchorNoPlane) ? "single" : "A";
-    anchorA.anchorType = anchorAType_->text().toStdString();
-    anchorA.partName = anchorAPart_->text().toStdString();
-    if (anchorADiameter_->value() > 0.0) {
-        anchorA.paramKey = "diameter";
-        anchorA.paramValue = anchorADiameter_->value();
-    }
-    r.anchors.push_back(anchorA);
-
-    if (isPointToPlane) {
-        rule::PlaneRef planeRef;
-        planeRef.planeType = planeType_->text().toStdString();
-        planeRef.partName = planePart_->text().toStdString();
-        r.referencePlane = planeRef;
-    } else if (!isSingleAnchorNoPlane) {
-        rule::Anchor anchorB;
-        anchorB.role = "B";
-        anchorB.anchorType = anchorBType_->text().toStdString();
-        anchorB.partName = anchorBPart_->text().toStdString();
-        if (anchorBDiameter_->value() > 0.0) {
-            anchorB.paramKey = "diameter";
-            anchorB.paramValue = anchorBDiameter_->value();
+    auto anchorFromA = [&](const std::string& role) {
+        rule::Anchor a;
+        a.role = role;
+        a.anchorType = anchorAType_->text().toStdString();
+        a.partName = anchorAPart_->text().toStdString();
+        if (anchorADiameter_->value() > 0.0) {
+            a.paramKey = "diameter";
+            a.paramValue = anchorADiameter_->value();
         }
-        r.anchors.push_back(anchorB);
+        return a;
+    };
+    auto anchorFromB = [&](const std::string& role) {
+        rule::Anchor b;
+        b.role = role;
+        b.anchorType = anchorBType_->text().toStdString();
+        b.partName = anchorBPart_->text().toStdString();
+        if (anchorBDiameter_->value() > 0.0) {
+            b.paramKey = "diameter";
+            b.paramValue = anchorBDiameter_->value();
+        }
+        return b;
+    };
+    auto planeFromA = [&] {
+        rule::PlaneRef p;
+        p.planeType = anchorAType_->text().toStdString();
+        p.partName = anchorAPart_->text().toStdString();
+        return p;
+    };
+    auto planeFromB = [&] {
+        rule::PlaneRef p;
+        p.planeType = anchorBType_->text().toStdString();
+        p.partName = anchorBPart_->text().toStdString();
+        return p;
+    };
+
+    if (isSingleAnchor) {
+        r.anchors.push_back(anchorFromA("single"));
+    } else if (isPointToPlane) {
+        // 클릭으로 어느 쪽이 평면인지 알고 있으면 그걸 따르고, 모르면(텍스트로 직접
+        // 입력) 기존 관례대로 A=점/B=평면으로 취급한다.
+        if (pickedAKind_ == geometry::PickedFaceKind::Plane && pickedBKind_ != geometry::PickedFaceKind::Plane) {
+            r.anchors.push_back(anchorFromB("single"));
+            r.referencePlane = planeFromA();
+        } else {
+            r.anchors.push_back(anchorFromA("single"));
+            r.referencePlane = planeFromB();
+        }
+    } else {
+        r.anchors.push_back(anchorFromA("A"));
+        r.anchors.push_back(anchorFromB("B"));
     }
 
     const QString selectorText = selector_->currentText();
@@ -368,6 +414,8 @@ void RuleEditorDialog::onSearchAnchorAClicked() {
         anchorAType_->setText(QString::fromStdString(dialog.AnchorType()));
         anchorAPart_->setText(QString::fromStdString(dialog.PartName()));
         anchorADiameter_->setValue(dialog.Diameter());
+        // 텍스트로 다시 채웠으니 이전 피킹 결과(있었다면)는 더 이상 유효하지 않다.
+        pickedAKind_ = geometry::PickedFaceKind::None;
     }
 }
 
@@ -379,6 +427,7 @@ void RuleEditorDialog::onSearchAnchorBClicked() {
         anchorBType_->setText(QString::fromStdString(dialog.AnchorType()));
         anchorBPart_->setText(QString::fromStdString(dialog.PartName()));
         anchorBDiameter_->setValue(dialog.Diameter());
+        pickedBKind_ = geometry::PickedFaceKind::None;
     }
 }
 
@@ -394,15 +443,11 @@ void RuleEditorDialog::ArmPicking(PickTarget target, const QString& statusText) 
 }
 
 void RuleEditorDialog::onPickAnchorAClicked() {
-    ArmPicking(PickTarget::AnchorA, "피킹 대기 중 - 3D 뷰에서 Anchor A로 쓸 구멍/보스(원통면)를 클릭하세요.");
+    ArmPicking(PickTarget::AnchorA, "피킹 대기 중 - 3D 뷰에서 포인트 A로 쓸 형상(구멍/보스 또는 평면)을 클릭하세요.");
 }
 
 void RuleEditorDialog::onPickAnchorBClicked() {
-    ArmPicking(PickTarget::AnchorB, "피킹 대기 중 - 3D 뷰에서 Anchor B로 쓸 구멍/보스(원통면)를 클릭하세요.");
-}
-
-void RuleEditorDialog::onPickPlaneClicked() {
-    ArmPicking(PickTarget::ReferencePlane, "피킹 대기 중 - 3D 뷰에서 기준평면으로 쓸 평면을 클릭하세요.");
+    ArmPicking(PickTarget::AnchorB, "피킹 대기 중 - 3D 뷰에서 포인트 B로 쓸 형상(구멍/보스 또는 평면)을 클릭하세요.");
 }
 
 void RuleEditorDialog::onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir) {
@@ -426,24 +471,83 @@ void RuleEditorDialog::onFacePicked(geometry::ModelHandle handle, QVector3D rayO
         return;
     }
 
-    if (target == PickTarget::AnchorA || target == PickTarget::AnchorB) {
-        if (result.kind != geometry::PickedFaceKind::Cylinder) {
-            QMessageBox::information(
-                this, "다시 클릭해주세요", "구멍/보스(원통면)을 클릭해야 합니다 - 평면을 클릭했습니다.");
-            return;
-        }
-        QLineEdit* typeField = (target == PickTarget::AnchorA) ? anchorAType_ : anchorBType_;
-        QDoubleSpinBox* diameterField = (target == PickTarget::AnchorA) ? anchorADiameter_ : anchorBDiameter_;
+    // 원통이든 평면이든 둘 다 포인트 A/B 자리를 받을 수 있다 - 어느 쪽인지는
+    // pickedAKind_/pickedBKind_에 기록해뒀다가 측정타입 추론과 BuildRule()이 쓴다.
+    QLineEdit* typeField = (target == PickTarget::AnchorA) ? anchorAType_ : anchorBType_;
+    QDoubleSpinBox* diameterField = (target == PickTarget::AnchorA) ? anchorADiameter_ : anchorBDiameter_;
+    if (result.kind == geometry::PickedFaceKind::Cylinder) {
         typeField->setText("Hole");
         diameterField->setValue(result.diameterMm);
-    } else if (target == PickTarget::ReferencePlane) {
-        if (result.kind != geometry::PickedFaceKind::Plane) {
-            QMessageBox::information(
-                this, "다시 클릭해주세요", "기준평면(평면)을 클릭해야 합니다 - 원통면을 클릭했습니다.");
-            return;
-        }
-        planeType_->setText("Datum_Plane");
+    } else {
+        typeField->setText("Datum_Plane");
+        diameterField->setValue(0.0);
     }
+
+    if (target == PickTarget::AnchorA) {
+        pickedAKind_ = result.kind;
+    } else {
+        pickedBKind_ = result.kind;
+    }
+
+    TryInferMeasurementType();
+}
+
+void RuleEditorDialog::TryInferMeasurementType() {
+    if (pickedAKind_ == geometry::PickedFaceKind::None || pickedBKind_ == geometry::PickedFaceKind::None) {
+        return; // 둘 다 찍혀야 조합을 판단할 수 있다.
+    }
+    const bool aCyl = pickedAKind_ == geometry::PickedFaceKind::Cylinder;
+    const bool bCyl = pickedBKind_ == geometry::PickedFaceKind::Cylinder;
+    if (aCyl && bCyl) {
+        measurementType_->setCurrentText("point_to_point");
+    } else if (aCyl != bCyl) {
+        measurementType_->setCurrentText("point_to_plane");
+    } else {
+        measurementType_->setCurrentText("face_to_face_gap");
+    }
+}
+
+void RuleEditorDialog::onCaptureRuleImageClicked() {
+    if (!viewerPanel_) {
+        QMessageBox::information(this, "캡쳐 불가", "먼저 STEP 파일을 불러오세요.");
+        return;
+    }
+    const QPixmap pixmap = viewerPanel_->grab();
+    if (pixmap.isNull()) {
+        QMessageBox::warning(this, "캡쳐 실패", "화면 캡쳐에 실패했습니다.");
+        return;
+    }
+
+    QDir imagesDir(QDir::current().filePath("rule_images"));
+    if (!imagesDir.exists() && !imagesDir.mkpath(".")) {
+        QMessageBox::warning(this, "캡쳐 실패", "이미지 저장 폴더를 만들지 못했습니다: " + imagesDir.path());
+        return;
+    }
+    const QString fileName = "rule_" + QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss_zzz") + ".png";
+    const QString fullPath = imagesDir.filePath(fileName);
+    if (!pixmap.save(fullPath, "PNG")) {
+        QMessageBox::warning(this, "캡쳐 실패", "이미지 저장에 실패했습니다: " + fullPath);
+        return;
+    }
+
+    ruleImagePath_ = fullPath.toStdString();
+    UpdateImagePreview();
+}
+
+void RuleEditorDialog::UpdateImagePreview() {
+    if (ruleImagePath_.empty()) {
+        imagePreviewLabel_->setPixmap(QPixmap());
+        imagePreviewLabel_->setText("저장된 이미지 없음");
+        return;
+    }
+    const QPixmap pixmap(QString::fromStdString(ruleImagePath_));
+    if (pixmap.isNull()) {
+        imagePreviewLabel_->setPixmap(QPixmap());
+        imagePreviewLabel_->setText("이미지를 불러올 수 없음");
+        return;
+    }
+    imagePreviewLabel_->setPixmap(pixmap.scaled(
+        kImagePreviewWidth, kImagePreviewHeight, Qt::KeepAspectRatio, Qt::SmoothTransformation));
 }
 
 } // namespace ui

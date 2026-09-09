@@ -67,6 +67,9 @@ struct Rule {
     std::string projection; // "3D" | "X" | "Y" | "Z" | "normal"
     double tolerancePlusMm = 0.0;
     double toleranceMinusMm = 0.0;
+    // § 이미지 캡쳐 연동(2026-09-09) - CTQ 관리서처럼 규칙별 측정 포인트 그림을 남기기
+    // 위해 3D 뷰 캡쳐본 파일 경로를 규칙에 붙여둔다. 없으면 nullopt(이미지 없음).
+    std::optional<std::string> imagePath;
 };
 
 } // namespace rule

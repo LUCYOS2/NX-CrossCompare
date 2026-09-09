@@ -30,6 +30,9 @@ Makefile
 *.sqlite
 *.sqlite3
 
+# 규칙별 캡쳐 이미지(런타임 산출물) - RuleEditorDialog::onCaptureRuleImageClicked
+rule_images/
+
 # Python
 __pycache__/
 *.pyc

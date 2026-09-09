@@ -136,7 +136,7 @@ void MainWindow::setupMenuBar() {
     // § 워크플로우(사용자 확인, 2026-09-08): 포인트 검색으로 형상을 먼저 확인 -> 규칙
     // 관리(RuleEditorDialog)에서 그 조건 그대로 불러와 규칙을 만들거나 수정. "포인트
     // 그룹"은 규칙 관리와 필드가 완전히 겹쳐서 폐기(대화 기록 참고) - 재사용은
-    // RuleEditorDialog의 Anchor A/B "검색..." 버튼이 대신한다.
+    // RuleEditorDialog의 포인트 A/B "검색..." 버튼이 대신한다.
     auto* searchMenu = bar->addMenu("포인트 검색");
     auto* searchAction = searchMenu->addAction("형상 검색...");
     connect(searchAction, &QAction::triggered, this, &MainWindow::onSearchAnchorsClicked);
