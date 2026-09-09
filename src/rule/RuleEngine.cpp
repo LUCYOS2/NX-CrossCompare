@@ -4,12 +4,25 @@
 #include "rule/Selector.h"
 
 #include <algorithm>
+#include <cmath>
+#include <limits>
 #include <optional>
 #include <stdexcept>
+#include <string>
+#include <utility>
 
 namespace rule {
 
 namespace {
+
+// anchor.paramKey=="diameter" 필터는 rule::FilterByDiameter(Selector.h)를 그대로 쓴다 -
+// 포인트 검색(AnchorSearchDialog)도 같은 필터를 써야 해서 공용 함수로 뺐다. 이름을
+// 다르게 둔 이유: 같은 이름으로 이 anonymous namespace 안에 선언하면 인수 개수가
+// 다른 오버로드라도 바깥(rule::) 쪽 선언을 가려버려서(이름 은닉) 컴파일이 깨진다.
+std::vector<geometry::AnchorCandidate> ApplyDiameterFilter(
+    std::vector<geometry::AnchorCandidate> candidates, const Anchor& anchor) {
+    return FilterByDiameter(std::move(candidates), anchor.paramKey, anchor.paramValue);
+}
 
 std::optional<geometry::AnchorCandidate> ResolveSingleAnchor(
     const std::vector<geometry::AnchorCandidate>& candidates, const std::vector<std::string>& selectors) {
@@ -62,10 +75,12 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.anchors.size() != 2) {
                 throw std::runtime_error(rule.name + ": point_to_point/axis_projection needs 2 anchors");
             }
-            const auto candidatesA = adapter.FindAnchorCandidates(
+            auto candidatesA = adapter.FindAnchorCandidates(
                 handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
-            const auto candidatesB = adapter.FindAnchorCandidates(
+            auto candidatesB = adapter.FindAnchorCandidates(
                 handle, rule.anchors[1].anchorType, rule.anchors[1].partName);
+            candidatesA = ApplyDiameterFilter(std::move(candidatesA), rule.anchors[0]);
+            candidatesB = ApplyDiameterFilter(std::move(candidatesB), rule.anchors[1]);
             const auto pair = ResolvePairAnchors(candidatesA, candidatesB, rule.selector);
             if (!pair) {
                 throw std::runtime_error(rule.name + ": failed to resolve anchor pair (ambiguous candidates)");
@@ -78,8 +93,9 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.anchors.size() != 1 || !rule.referencePlane.has_value()) {
                 throw std::runtime_error(rule.name + ": point_to_plane needs 1 anchor + referencePlane");
             }
-            const auto candidates = adapter.FindAnchorCandidates(
+            auto candidates = adapter.FindAnchorCandidates(
                 handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
+            candidates = ApplyDiameterFilter(std::move(candidates), rule.anchors[0]);
             const auto resolved = ResolveSingleAnchor(candidates, rule.selector);
             if (!resolved) {
                 throw std::runtime_error(rule.name + ": failed to resolve anchor (ambiguous candidates)");
@@ -110,6 +126,45 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.projection == "Y") return box.max.y - box.min.y;
             if (rule.projection == "Z") return box.max.z - box.min.z;
             throw std::runtime_error(rule.name + ": overall_size requires projection X/Y/Z, got: " + rule.projection);
+        }
+        case MeasurementType::InstanceCount: {
+            if (rule.anchors.size() != 1) {
+                throw std::runtime_error(rule.name + ": instance_count needs 1 anchor");
+            }
+            auto candidates = adapter.FindAnchorCandidates(
+                handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
+            candidates = ApplyDiameterFilter(std::move(candidates), rule.anchors[0]);
+            return static_cast<double>(candidates.size());
+        }
+        case MeasurementType::MinPitch: {
+            if (rule.anchors.size() != 1) {
+                throw std::runtime_error(rule.name + ": min_pitch needs 1 anchor");
+            }
+            auto candidates = adapter.FindAnchorCandidates(
+                handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
+            candidates = ApplyDiameterFilter(std::move(candidates), rule.anchors[0]);
+            if (candidates.size() < 2) {
+                throw std::runtime_error(
+                    rule.name + ": min_pitch needs at least 2 matching candidates (found " +
+                    std::to_string(candidates.size()) + ")");
+            }
+            // projection을 정렬 축(X/Y/Z)으로 재사용 - 비어있으면 X를 기본값으로 쓴다.
+            const std::string& axis = rule.projection;
+            auto axisValue = [&axis](const geometry::Vec3& p) {
+                if (axis == "Y") return p.y;
+                if (axis == "Z") return p.z;
+                return p.x;
+            };
+            std::sort(candidates.begin(), candidates.end(),
+                      [&axisValue](const geometry::AnchorCandidate& a, const geometry::AnchorCandidate& b) {
+                          return axisValue(a.position) < axisValue(b.position);
+                      });
+            double minGap = std::numeric_limits<double>::max();
+            for (size_t i = 1; i < candidates.size(); ++i) {
+                minGap = std::min(
+                    minGap, ComputePointToPointDistance(candidates[i - 1].position, candidates[i].position));
+            }
+            return minGap;
         }
     }
     throw std::runtime_error(rule.name + ": unknown measurement type");

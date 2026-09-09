@@ -343,6 +343,18 @@ void ModelViewport::mousePressEvent(QMouseEvent* event) {
     // 기반 방식일 때 F/H/I가 전혀 안 먹었음). 그래도 시각적 포커스 표시는 자연스럽도록 유지.
     setFocus(Qt::MouseFocusReason);
 
+    // § 3D 클릭 피킹 - 피킹 모드 중이면 좌클릭이 회전을 시작하지 않고 광선만 쏜다.
+    // 정밀하게 면을 짚어야 하는데 살짝 흔들려도 회전이 같이 걸리면 방해가 되므로,
+    // 피킹 모드 동안은 좌클릭 회전을 완전히 잠근다(mouseMoveEvent에서도 동일하게 체크).
+    if (pickModeActive_ && *pickModeActive_ && event->button() == Qt::LeftButton) {
+        QVector3D rayOrigin;
+        QVector3D rayDir;
+        if (computeSectionRay(rayOrigin, rayDir)) {
+            emit facePicked(handle_, rayOrigin, rayDir);
+        }
+        return;
+    }
+
     // 중클릭 = 단면 위치 지정(사용자 요청: 축 선택 후 도면의 마우스 포인트 기준으로 자르기).
     // 좌/우클릭은 이미 회전/팬이라 비어있는 휠버튼 클릭을 썼다. 단면이 꺼져 있으면 아무 일도
     // 안 한다.
@@ -356,8 +368,11 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
     lastMousePos_ = event->pos(); // setMouseTracking(true)라 버튼 안 눌러도 항상 갱신됨 (H가 씀)
 
     // 마우스 매핑: 좌클릭=회전, 우클릭=팬, 중클릭=단면 위치 지정, 휠=줌(wheelEvent).
-    // §16 2차 버전(면/점 피킹)은 나중에 다른 입력(더블클릭 등)으로 붙여야 한다.
+    // 피킹 모드(§ 3D 클릭 피킹) 동안은 좌클릭 회전을 잠근다 - mousePressEvent 참고.
     // 독립 조작 모드(§ 화면설정)면 sharedCamera_가 아니라 이 뷰포트의 localCamera_만 바뀐다.
+    if (pickModeActive_ && *pickModeActive_) {
+        return;
+    }
     Camera* transform = ActiveTransform();
     if (event->buttons() & Qt::LeftButton) {
         transform->yawDeg += delta.x() * 0.5f;

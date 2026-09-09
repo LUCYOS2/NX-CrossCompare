@@ -321,4 +321,92 @@ std::vector<rule::PointSample> Database::LoadPoints(int ruleId) {
     return points;
 }
 
+void Database::UpdateRule(int ruleId, const rule::Rule& r) {
+    Stmt stmt(db_,
+        "UPDATE rules SET name = ?, measurement_type = ?, projection = ?, "
+        "tolerance_plus_mm = ?, tolerance_minus_mm = ?, plane_type = ?, plane_part_name = ? "
+        "WHERE id = ?;");
+    stmt.BindText(1, r.name);
+    stmt.BindText(2, ToString(r.measurementType));
+    stmt.BindText(3, r.projection);
+    stmt.BindDouble(4, r.tolerancePlusMm);
+    stmt.BindDouble(5, r.toleranceMinusMm);
+    if (r.referencePlane.has_value()) {
+        stmt.BindText(6, r.referencePlane->planeType);
+        stmt.BindText(7, r.referencePlane->partName);
+    } else {
+        stmt.BindNull(6);
+        stmt.BindNull(7);
+    }
+    stmt.BindInt(8, ruleId);
+    stmt.Step();
+
+    // 자식 테이블(anchor/reference_frame/selector)은 개수·순서가 통째로 바뀔 수 있어서
+    // "지우고 다시 채우기"가 부분 UPDATE보다 훨씬 단순하고 실수가 적다 - SaveRule의
+    // INSERT 로직을 그대로 재사용.
+    {
+        Stmt del(db_, "DELETE FROM rule_anchors WHERE rule_id = ?;");
+        del.BindInt(1, ruleId);
+        del.Step();
+    }
+    for (const auto& anchor : r.anchors) {
+        Stmt ins(db_,
+            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value) "
+            "VALUES (?, ?, ?, ?, ?, ?);");
+        ins.BindInt(1, ruleId);
+        ins.BindText(2, anchor.role);
+        ins.BindText(3, anchor.anchorType);
+        ins.BindText(4, anchor.partName);
+        if (anchor.paramKey.has_value()) {
+            ins.BindText(5, *anchor.paramKey);
+            ins.BindDouble(6, anchor.paramValue.value_or(0.0));
+        } else {
+            ins.BindNull(5);
+            ins.BindNull(6);
+        }
+        ins.Step();
+    }
+
+    {
+        Stmt del(db_, "DELETE FROM rule_reference_frames WHERE rule_id = ?;");
+        del.BindInt(1, ruleId);
+        del.Step();
+    }
+    for (size_t i = 0; i < r.referenceFrame.size(); ++i) {
+        Stmt ins(db_,
+            "INSERT INTO rule_reference_frames (rule_id, priority, frame_name) VALUES (?, ?, ?);");
+        ins.BindInt(1, ruleId);
+        ins.BindInt(2, static_cast<int>(i));
+        ins.BindText(3, r.referenceFrame[i]);
+        ins.Step();
+    }
+
+    {
+        Stmt del(db_, "DELETE FROM rule_selectors WHERE rule_id = ?;");
+        del.BindInt(1, ruleId);
+        del.Step();
+    }
+    for (size_t i = 0; i < r.selector.size(); ++i) {
+        Stmt ins(db_,
+            "INSERT INTO rule_selectors (rule_id, priority, selector_name) VALUES (?, ?, ?);");
+        ins.BindInt(1, ruleId);
+        ins.BindInt(2, static_cast<int>(i));
+        ins.BindText(3, r.selector[i]);
+        ins.Step();
+    }
+}
+
+void Database::DeleteRule(int ruleId) {
+    // FK 체크가 켜져 있지만(PRAGMA foreign_keys=ON) rule_anchors 등은 ON DELETE 규칙이
+    // 없으므로 자식부터 직접 지운다.
+    for (const char* table : {"rule_anchors", "rule_reference_frames", "rule_selectors", "points"}) {
+        Stmt stmt(db_, std::string("DELETE FROM ") + table + " WHERE rule_id = ?;");
+        stmt.BindInt(1, ruleId);
+        stmt.Step();
+    }
+    Stmt stmt(db_, "DELETE FROM rules WHERE id = ?;");
+    stmt.BindInt(1, ruleId);
+    stmt.Step();
+}
+
 } // namespace database

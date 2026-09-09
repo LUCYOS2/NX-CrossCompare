@@ -39,6 +39,12 @@ public:
     std::vector<FaceCandidate> FindFaceCandidates(
         ModelHandle handle, const std::string& faceType, const std::string& partName) const override;
 
+    // § 3D 클릭 피킹 - 광선과 모델의 모든 면을 정확히 교차시켜(OCCT
+    // IntCurvesFace_Intersector) 가장 가까운 히트를 찾고, 그 면을 원통/평면으로 판별한다.
+    // FindAnchorCandidates/FindPlaneCandidates와 같은 판별 기준(GeomAbs_Cylinder/Plane)을
+    // 재사용하므로, 여기서 나온 결과를 anchor_type/지름으로 그대로 옮겨써도 일관된다.
+    PickResult PickFace(ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const override;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

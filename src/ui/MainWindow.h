@@ -21,6 +21,8 @@ class MultiViewportPanel;
 
 namespace ui {
 
+class RuleEditorDialog;
+
 // Phase2: 중앙 영역은 MultiViewportPanel(Mock 데이터, 6개 인치)로 채워짐 - 뷰어 공간을
 // 최대한 넓게 쓰기 위해 좌/우 메뉴는 도킹 패널이 아니라 상단 메뉴바 한 줄로 통합했다.
 // Phase4/4b: 하단 영역은 내장 규칙(BuiltInRules) + 사용자가 추가한 규칙(DB 저장)을
@@ -42,6 +44,7 @@ private slots:
     void onRuleHeaderClicked(int section);
     void onImportStepClicked();
     void onCaptureImageClicked();
+    void onSearchAnchorsClicked();
 
 private:
     void setupMenuBar();
@@ -52,6 +55,9 @@ private:
     // STEP 재로드마다 패널을 새로 만들기 때문에, 재로드 후에도 사용자가 고른 설정이
     // 유지되도록 매번 다시 걸어준다(currentRenderMode_/currentSyncedManipulation_ 참고).
     void applyDisplaySettingsToCurrentPanel();
+    // setupCentralViewer()와 onSearchAnchorsClicked()가 둘 다 "인치별 라벨+handle
+    // 목록"이 필요해서 공유하는 헬퍼.
+    std::vector<std::pair<std::string, geometry::ModelHandle>> BuildLoadedModelList() const;
 
     std::unique_ptr<geometry::IGeometryAdapter> adapter_;
     database::Database db_;
@@ -83,6 +89,10 @@ private:
     viewer::MultiViewportPanel* viewerPanel_ = nullptr;
     viewer::RenderMode currentRenderMode_ = viewer::RenderMode::SolidEdge;
     bool currentSyncedManipulation_ = true;
+
+    // § 3D 클릭 피킹 - 비모달로 바뀌면서 동시에 두 개 뜨는 걸 막고, STEP 재로드 시
+    // RewireViewerPanel로 다시 연결해주기 위해 열려있는 인스턴스를 계속 들고 있는다.
+    RuleEditorDialog* activeRuleDialog_ = nullptr;
 };
 
 } // namespace ui

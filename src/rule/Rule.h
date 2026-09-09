@@ -23,7 +23,15 @@ enum class MeasurementType {
     FaceToFaceGap,
     // 전장 사이즈(X/Y/Z) - anchor/selector 탐색 없이 BoundingBox에서 직접 계산하는
     // "기본 세팅" 항목. 다른 측정 타입과 성격이 달라 anchors가 비어있어도 된다.
-    OverallSize
+    OverallSize,
+    // 형상 개수 - anchor 1개(role="single")로 찾은 후보 개수를 그대로 값으로 쓴다.
+    // 예: 구멍이 몇 개인지. Anchor.paramKey=="diameter"를 지정하면 그 지름(±공차)에
+    // 맞는 후보만 세므로 "비슷한 지름의 구멍만 카운트"도 가능하다.
+    InstanceCount,
+    // 최소 간격(Pitch) - anchor 1개(role="single")로 찾은 후보들을 projection 축
+    // (X/Y/Z) 기준 정렬한 뒤, 인접한 후보끼리의 거리 중 최솟값을 값으로 쓴다.
+    // 후보가 2개 미만이면 계산 불가(오류로 표시).
+    MinPitch,
 };
 
 std::string ToString(MeasurementType type);

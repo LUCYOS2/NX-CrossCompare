@@ -19,6 +19,22 @@ double NormalDot(const geometry::Vec3& a, const geometry::Vec3& b) {
 
 } // namespace
 
+std::vector<geometry::AnchorCandidate> FilterByDiameter(
+    std::vector<geometry::AnchorCandidate> candidates,
+    const std::optional<std::string>& paramKey, const std::optional<double>& paramValue) {
+    if (paramKey != "diameter" || !paramValue.has_value()) {
+        return candidates;
+    }
+    const double target = *paramValue;
+    std::vector<geometry::AnchorCandidate> filtered;
+    for (auto& candidate : candidates) {
+        if (std::abs(candidate.diameterMm - target) <= kDiameterMatchToleranceMm) {
+            filtered.push_back(std::move(candidate));
+        }
+    }
+    return filtered;
+}
+
 std::optional<std::pair<geometry::AnchorCandidate, geometry::AnchorCandidate>> SelectNearestPair(
     const std::vector<geometry::AnchorCandidate>& candidatesA,
     const std::vector<geometry::AnchorCandidate>& candidatesB) {

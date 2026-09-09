@@ -44,11 +44,19 @@ public:
     // 덮어써서, F/I를 누르면 개별 조작 여부와 상관없이 전부 같은 자세로 리셋되게 한다.
     void ResetLocalTransform();
 
+    // § 3D 클릭 피킹(2026-09-09) - RuleEditorDialog가 "포인트 지정" 버튼으로 켜는 전역
+    // 피킹 모드. *ptr이 true면 좌클릭이 회전 대신 facePicked를 쏜다(회전은 그동안 잠김) -
+    // independentModePtr_와 같은 "MultiViewportPanel 소유, 포인터로 공유" 패턴.
+    void SetPickModePtr(const bool* pickModeActive) { pickModeActive_ = pickModeActive; }
+
 signals:
     void cameraChanged();
     // 마우스가 이 뷰포트 위로 들어옴 - MultiViewportPanel이 "단축키를 어느 뷰포트에
     // 적용할지" 판단하는 데 쓴다(호버된 뷰포트 = 가장 최근에 커서가 들어온 뷰포트).
     void hoverEntered();
+    // 피킹 모드 중 좌클릭 - 클릭 순간의 월드 광선(origin/dir)을 그대로 넘긴다. 실제
+    // "이게 무슨 면이냐" 판별은 IGeometryAdapter::PickFace(OCCT)가 하므로 여기선 광선만.
+    void facePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir);
 
 protected:
     void initializeGL() override;
@@ -76,6 +84,7 @@ private:
     Camera* sharedCamera_;
     Camera localCamera_;                       // 독립 조작 모드에서만 사용
     const bool* independentModePtr_ = nullptr; // MultiViewportPanel 소유, 생성 직후 SetIndependentModePtr로 연결됨
+    const bool* pickModeActive_ = nullptr;     // MultiViewportPanel 소유, RuleEditorDialog가 켬/끔
     QPoint lastMousePos_;
 
     QOpenGLVertexArrayObject vao_;

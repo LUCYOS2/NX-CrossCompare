@@ -5,6 +5,8 @@ add_library(ui STATIC
     RuleEditorDialog.cpp
     ImportInchDialog.h
     ImportInchDialog.cpp
+    AnchorSearchDialog.h
+    AnchorSearchDialog.cpp
 )
 
 target_link_libraries(ui PUBLIC Qt6::Widgets viewer rule export_lib database)

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QVector3D>
 #include <QWidget>
 
 #include <string>
@@ -36,6 +37,16 @@ public:
     void setRenderMode(RenderMode mode);
     void setSyncedManipulation(bool synced);
 
+    // § 3D 클릭 피킹 - RuleEditorDialog가 "포인트 지정" 버튼을 누르면 켜고, 결과를
+    // 받거나 취소하면 끈다. 켜져 있는 동안 모든 뷰포트의 좌클릭이 회전 대신 피킹으로
+    // 동작한다(ModelViewport::pickModeActive_ 참고).
+    void setPickModeActive(bool active);
+
+signals:
+    // 어느 뷰포트에서 찍었든 여기로 모여서 나간다 - RuleEditorDialog는 패널 하나에만
+    // 연결하면 되고, 개별 ModelViewport를 알 필요가 없다.
+    void facePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir);
+
 private:
     // F(FIT TO VIEW) 재계산에 필요 - 로드된 모든 모델의 핸들을 들고 있어야
     // 나중에라도(최초 로드 이후) bounding box 합집합을 다시 구할 수 있다.
@@ -69,6 +80,9 @@ private:
     // 조작되고, true면 각 ModelViewport가 자기 localCamera_로 독립 조작된다. 포인터로
     // 각 ModelViewport에 넘겨서 공유한다(ModelViewport::SetIndependentModePtr 참고).
     bool independentMode_ = false;
+    // § 3D 클릭 피킹 - setPickModeActive()로 켜고 끄며, 각 ModelViewport에 포인터로
+    // 공유한다(independentMode_와 같은 패턴).
+    bool pickModeActive_ = false;
 
     QCheckBox* sectionEnableCheck_ = nullptr;
     QPushButton* axisButtons_[3] = {nullptr, nullptr, nullptr};

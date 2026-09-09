@@ -22,6 +22,10 @@ struct AnchorCandidate {
     std::string anchorType; // Hole, Boss_Center, Hook_Tip_Edge, ...
     std::string partName;   // Bezel, Rear_Chassis, ...
     Vec3 position;
+    // 원통면(Hole/Boss_Center) 후보의 지름(mm). 평면/edge 기반 등 원통이 아닌 타입은 0.
+    // Rule의 Anchor.paramKey=="diameter"일 때 후보를 걸러내는 데 쓰인다(RuleEngine 참고) -
+    // "비슷한 지름의 구멍만 다 찾기" 요청에 대응하는 필드.
+    double diameterMm = 0.0;
 };
 
 // point_to_plane 측정의 기준 평면 후보. 평면 위 한 점 + 법선벡터로 표현.
@@ -40,6 +44,23 @@ struct FaceCandidate {
     std::string partName;
     Vec3 center;
     Vec3 normal;
+};
+
+// § 3D 클릭 피킹(2026-09-09) - 텍스트로 anchor_type/지름을 타이핑하는 대신, 뷰어에서
+// 마우스로 실제 면을 클릭해 그 자리에서 형상을 판별한다. kind는 지금은 원통("Cylinder")과
+// 평면("Plane") 두 가지만 구분 - 후크처럼 여러 면이 합쳐진 복합 형상 인식(§ 대화 기록,
+// "①단계"로 범위를 좁힌 부분)은 원격PC에서 실제 후크 샘플이 생기면 다음 단계로 확장.
+enum class PickedFaceKind {
+    None,     // 아무것도 안 맞음(광선이 형상을 비껴감)
+    Cylinder, // FindAnchorCandidates의 Hole/Boss_Center와 같은 판별 기준
+    Plane,    // FindPlaneCandidates의 Datum_Plane과 같은 판별 기준
+};
+
+struct PickResult {
+    PickedFaceKind kind = PickedFaceKind::None;
+    Vec3 point;           // 광선이 면과 만난 지점(원통이면 축 위 가장 가까운 점 - AnchorCandidate.position과 동일 기준)
+    Vec3 normal;          // Plane일 때만 의미 있음
+    double diameterMm = 0.0; // Cylinder일 때만 의미 있음
 };
 
 using ModelHandle = int;
@@ -64,6 +85,17 @@ public:
 
     virtual std::vector<FaceCandidate> FindFaceCandidates(
         ModelHandle handle, const std::string& faceType, const std::string& partName) const = 0;
+
+    // § 3D 클릭 피킹 - 월드좌표 광선(origin+dir)과 형상의 실제 면 사이 정확한 교차를 구해
+    // 어떤 면인지 판별한다. 기본 구현은 "아무것도 못 찾음"을 반환 - 실 형상 B-rep이 없는
+    // 어댑터(Mock, 미구현 NxJt)는 이 자체가 의미 없어서 override를 강제하지 않는다.
+    // StepGeometryAdapter만 OCCT로 override.
+    virtual PickResult PickFace(ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const {
+        (void)handle;
+        (void)rayOrigin;
+        (void)rayDir;
+        return PickResult{};
+    }
 
     // 뷰어가 실제 렌더링에 쓰는 삼각형 메시. 연속된 3개 Vec3가 삼각형 1개(flat 셰이딩,
     // 별도 법선 데이터 없이 화면공간 미분(dFdx/dFdy)으로 면 법선을 계산). 실 형상

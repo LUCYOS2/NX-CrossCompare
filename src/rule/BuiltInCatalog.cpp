@@ -99,6 +99,34 @@ std::vector<Rule> BuiltInRules() {
         rules.push_back(r);
     }
 
+    // 006. 구멍 개수 - 지오메트리 인식 파이프라인 검증용(§ 화면설정 다음 작업, Pitch
+    // 논의). anchor_type="Hole"은 StepGeometryAdapter가 이미 원통면 전부를 후보로
+    // 반환하므로, diameter 필터 없이도 실제 STEP 샘플에서 바로 개수가 나온다.
+    {
+        Rule r;
+        r.name = "006. 구멍 개수 (Hole)";
+        r.anchors = {Anchor{"single", "Hole", "", std::nullopt, std::nullopt}};
+        r.referenceFrame = {"World_Origin"};
+        r.measurementType = MeasurementType::InstanceCount;
+        rules.push_back(r);
+    }
+
+    // 007. 구멍 최소 간격 (Pitch) - X축 기준 정렬 후 인접 간격 중 최솟값. 후크 간격
+    // 측정을 위해 설계했지만 Hook_Tip_Edge 인식이 아직 없어서(§ 논의), 이미 되는
+    // Hole로 먼저 파이프라인 자체를 검증한다 - 나중에 후크 인식이 생기면 anchor_type만
+    // 바꿔 끼우면 된다.
+    {
+        Rule r;
+        r.name = "007. 구멍 최소 간격 (Pitch, X축)";
+        r.anchors = {Anchor{"single", "Hole", "", std::nullopt, std::nullopt}};
+        r.referenceFrame = {"World_Origin"};
+        r.measurementType = MeasurementType::MinPitch;
+        r.projection = "X";
+        r.tolerancePlusMm = 0.1;
+        r.toleranceMinusMm = 0.1;
+        rules.push_back(r);
+    }
+
     return rules;
 }
 

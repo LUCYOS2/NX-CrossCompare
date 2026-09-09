@@ -36,6 +36,7 @@
 #include "geometry/StepGeometryAdapter.h"
 #include "rule/BuiltInCatalog.h"
 #include "rule/RuleEngine.h"
+#include "ui/AnchorSearchDialog.h"
 #include "ui/ImportInchDialog.h"
 #include "ui/RuleEditorDialog.h"
 #include "viewer/MultiViewportPanel.h"
@@ -65,10 +66,6 @@ void MainWindow::setupMenuBar() {
     auto* bar = menuBar();
 
     bar->addMenu("프로젝트");
-
-    auto* ruleMenu = bar->addMenu("규칙 관리");
-    auto* addRuleAction = ruleMenu->addAction("+ 새 규칙 추가");
-    connect(addRuleAction, &QAction::triggered, this, &MainWindow::onAddRuleClicked);
 
     auto* viewMenu = bar->addMenu("화면 설정");
 
@@ -135,14 +132,24 @@ void MainWindow::setupMenuBar() {
     connect(importStepAction, &QAction::triggered, this, &MainWindow::onImportStepClicked);
 
     bar->addMenu("옵션");
-    bar->addMenu("포인트 그룹");
-    bar->addMenu("포인트 검색");
+
+    // § 워크플로우(사용자 확인, 2026-09-08): 포인트 검색으로 형상을 먼저 확인 -> 규칙
+    // 관리(RuleEditorDialog)에서 그 조건 그대로 불러와 규칙을 만들거나 수정. "포인트
+    // 그룹"은 규칙 관리와 필드가 완전히 겹쳐서 폐기(대화 기록 참고) - 재사용은
+    // RuleEditorDialog의 Anchor A/B "검색..." 버튼이 대신한다.
+    auto* searchMenu = bar->addMenu("포인트 검색");
+    auto* searchAction = searchMenu->addAction("형상 검색...");
+    connect(searchAction, &QAction::triggered, this, &MainWindow::onSearchAnchorsClicked);
+
+    auto* ruleMenu = bar->addMenu("규칙 관리");
+    auto* addRuleAction = ruleMenu->addAction("+ 새 규칙 추가");
+    connect(addRuleAction, &QAction::triggered, this, &MainWindow::onAddRuleClicked);
 }
 
-void MainWindow::setupCentralViewer() {
+std::vector<std::pair<std::string, geometry::ModelHandle>> MainWindow::BuildLoadedModelList() const {
     // inchFiles_는 onImportStepClicked에서 이미 인치 오름차순(소형->대형)으로 정렬해
-    // 두므로, 여기서는 순서 그대로 그리드에 배치하면 된다. handle도 이미 로드된 것을
-    // 재사용 - 뷰어가 파일을 다시 파싱하지 않는다.
+    // 두므로, 순서 그대로 반환하면 된다. handle도 이미 로드된 것을 재사용 - 다시
+    // 파싱하지 않는다.
     std::vector<std::pair<std::string, geometry::ModelHandle>> models;
     for (const auto& entry : inchFiles_) {
         const QString label = entry.inch > 0
@@ -150,10 +157,20 @@ void MainWindow::setupCentralViewer() {
             : QFileInfo(QString::fromStdString(entry.filePath)).fileName();
         models.push_back({label.toStdString(), entry.handle});
     }
-    auto* panel = new viewer::MultiViewportPanel(adapter_.get(), models, this);
+    return models;
+}
+
+void MainWindow::setupCentralViewer() {
+    auto* panel = new viewer::MultiViewportPanel(adapter_.get(), BuildLoadedModelList(), this);
     setCentralWidget(panel);
     viewerPanel_ = panel;
     applyDisplaySettingsToCurrentPanel();
+    // 규칙 관리가 비모달로 열려 있는 동안 STEP을 다시 불러오면 이전 패널이 통째로
+    // 교체된다 - 다이얼로그가 그 패널을 가리키던 포인터를 계속 들고 있으면 댕글링되므로
+    // 새 패널로 다시 연결해준다.
+    if (activeRuleDialog_) {
+        activeRuleDialog_->RewireViewerPanel(viewerPanel_);
+    }
 }
 
 void MainWindow::applyDisplaySettingsToCurrentPanel() {
@@ -300,19 +317,35 @@ void MainWindow::onRuleHeaderClicked(int section) {
     refreshComparisonTable();
 }
 
+// § 규칙 관리 통합 + 3D 클릭 피킹 - 이 창을 열어둔 채로 뒤의 3D 뷰포트를 클릭해야
+// 해서 비모달로 띄운다(exec() 대신 show()). RuleEditorDialog가 목록 조회+생성+수정+
+// 삭제를 전부 자체적으로 DB에 즉시 반영하고 rulesChanged()를 쏘므로, 그걸 받아서
+// 비교 테이블만 새로 고친다. 이미 열려 있으면 새로 만들지 않고 그 창을 앞으로 올린다.
 void MainWindow::onAddRuleClicked() {
-    RuleEditorDialog dialog(this);
-    if (dialog.exec() != QDialog::Accepted) {
+    if (activeRuleDialog_) {
+        activeRuleDialog_->raise();
+        activeRuleDialog_->activateWindow();
         return;
     }
+    auto* dialog = new RuleEditorDialog(&db_, projectId_, adapter_.get(), viewerPanel_, BuildLoadedModelList(), this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    activeRuleDialog_ = dialog;
+    connect(dialog, &QObject::destroyed, this, [this]() { activeRuleDialog_ = nullptr; });
+    connect(dialog, &RuleEditorDialog::rulesChanged, this, &MainWindow::refreshComparisonTable);
+    dialog->show();
+}
 
-    const rule::Rule newRule = dialog.BuildRule();
-    try {
-        db_.SaveRule(projectId_, newRule);
-        refreshComparisonTable();
-    } catch (const std::exception& e) {
-        QMessageBox::critical(this, "규칙 저장 실패", QString::fromStdString(e.what()));
+// § 포인트 검색 - anchor_type(+부품명/지름)을 입력하면 현재 로드된 인치 중 하나를
+// 골라 실제 매칭 후보를 미리 보여준다. 아직 STEP을 하나도 안 불러왔으면 검색할
+// 대상이 없다는 뜻이라 바로 안내만 하고 다이얼로그를 열지 않는다.
+void MainWindow::onSearchAnchorsClicked() {
+    const auto models = BuildLoadedModelList();
+    if (models.empty()) {
+        QMessageBox::information(this, "검색 대상 없음", "먼저 STEP 파일을 불러온 뒤 검색하세요.");
+        return;
     }
+    AnchorSearchDialog dialog(adapter_.get(), models, this);
+    dialog.exec();
 }
 
 void MainWindow::onImportStepClicked() {

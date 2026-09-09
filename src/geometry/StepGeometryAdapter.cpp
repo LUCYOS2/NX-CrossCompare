@@ -6,6 +6,7 @@
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <IFSelect_ReturnStatus.hxx>
+#include <IntCurvesFace_Intersector.hxx>
 #include <Poly_Triangulation.hxx>
 #include <STEPControl_Reader.hxx>
 #include <TopAbs_Orientation.hxx>
@@ -18,12 +19,14 @@
 #include <gp_Ax1.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -183,7 +186,7 @@ std::vector<AnchorCandidate> StepGeometryAdapter::FindAnchorCandidates(
         const gp_Ax1 axis = cylinder.Axis();
         const gp_Pnt center = axis.Location();
         candidates.push_back(AnchorCandidate{
-            anchorType, partName, Vec3{center.X(), center.Y(), center.Z()}});
+            anchorType, partName, Vec3{center.X(), center.Y(), center.Z()}, cylinder.Radius() * 2.0});
     }
     return candidates;
 }
@@ -211,6 +214,68 @@ std::vector<PlaneCandidate> StepGeometryAdapter::FindPlaneCandidates(
             Vec3{normal.X(), normal.Y(), normal.Z()}});
     }
     return candidates;
+}
+
+PickResult StepGeometryAdapter::PickFace(
+    ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return PickResult{};
+    }
+
+    const gp_Lin line(gp_Pnt(rayOrigin.x, rayOrigin.y, rayOrigin.z),
+                       gp_Dir(rayDir.x, rayDir.y, rayDir.z));
+
+    // 모델의 모든 면과 광선을 정확히 교차시켜(근사 없음), 광선을 따라 가장 먼저(=가장
+    // 가까운) 맞는 면을 찾는다 - 여러 면이 겹쳐 보여도 화면에서 실제로 보이는 면이
+    // 뽑히도록 하기 위함(뒤에 가려진 면이 아니라).
+    constexpr double kIntersectionTolerance = 1e-4;
+    double bestParam = std::numeric_limits<double>::max();
+    TopoDS_Face bestFace;
+    bool found = false;
+
+    for (TopExp_Explorer faceExp(model->shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
+        IntCurvesFace_Intersector intersector(face, kIntersectionTolerance);
+        intersector.Perform(line, 0.0, std::numeric_limits<double>::max());
+        if (!intersector.IsDone()) {
+            continue;
+        }
+        for (int i = 1; i <= intersector.NbPnt(); ++i) {
+            const double w = intersector.WParameter(i);
+            if (w >= 0.0 && w < bestParam) {
+                bestParam = w;
+                bestFace = face;
+                found = true;
+            }
+        }
+    }
+
+    if (!found) {
+        return PickResult{};
+    }
+
+    // 판별 기준은 FindAnchorCandidates/FindPlaneCandidates와 동일(GeomAbs_Cylinder/Plane) -
+    // 클릭으로 얻은 결과와 텍스트 검색으로 얻은 결과가 같은 형상이면 같은 값이 나오게.
+    BRepAdaptor_Surface surface(bestFace, /*restrictTriangulation=*/false);
+    PickResult result;
+    if (surface.GetType() == GeomAbs_Cylinder) {
+        const gp_Cylinder cylinder = surface.Cylinder();
+        const gp_Pnt center = cylinder.Axis().Location();
+        result.kind = PickedFaceKind::Cylinder;
+        result.point = Vec3{center.X(), center.Y(), center.Z()};
+        result.diameterMm = cylinder.Radius() * 2.0;
+    } else if (surface.GetType() == GeomAbs_Plane) {
+        const gp_Pln plane = surface.Plane();
+        const gp_Pnt point = plane.Location();
+        const gp_Dir normal = plane.Axis().Direction();
+        result.kind = PickedFaceKind::Plane;
+        result.point = Vec3{point.X(), point.Y(), point.Z()};
+        result.normal = Vec3{normal.X(), normal.Y(), normal.Z()};
+    }
+    // 그 외 면 타입(원뿔/자유곡면 등)은 지금 단계에서 지원 안 함 - kind는 None으로 남는다.
+
+    return result;
 }
 
 std::vector<FaceCandidate> StepGeometryAdapter::FindFaceCandidates(

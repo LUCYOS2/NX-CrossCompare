@@ -85,6 +85,7 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
 
         auto* viewport = new ModelViewport(adapter, handle, &camera_, container);
         viewport->SetIndependentModePtr(&independentMode_);
+        viewport->SetPickModePtr(&pickModeActive_);
         viewports_.push_back(viewport);
 
         vbox->addWidget(labelWidget);
@@ -101,6 +102,8 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
         connect(viewport, &ModelViewport::hoverEntered, this, [this, viewport]() {
             hoveredViewport_ = viewport;
         });
+        // § 3D 클릭 피킹 - 어느 뷰포트에서 찍었든 패널의 facePicked 하나로 모아서 내보낸다.
+        connect(viewport, &ModelViewport::facePicked, this, &MultiViewportPanel::facePicked);
 
         const int row = placed / columns;
         const int col = placed % columns;
@@ -434,6 +437,10 @@ void MultiViewportPanel::setSyncedManipulation(bool synced) {
             vp->ResetLocalTransform();
         }
     }
+}
+
+void MultiViewportPanel::setPickModeActive(bool active) {
+    pickModeActive_ = active;
 }
 
 } // namespace viewer

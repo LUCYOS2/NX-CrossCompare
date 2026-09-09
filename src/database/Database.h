@@ -28,6 +28,11 @@ public:
     int SaveRule(int projectId, const rule::Rule& r);
     rule::Rule LoadRule(int ruleId);
     std::vector<rule::Rule> LoadRulesForProject(int projectId);
+    // § 규칙 관리 통합(포인트 그룹 폐기, 2026-09-08) - 저장된 사용자 규칙을 목록에서
+    // 클릭해 불러와 수정/삭제할 수 있어야 해서 추가. SaveRule은 항상 새 id로 INSERT하는
+    // "생성" 전용이고, 이 둘은 이미 있는 규칙을 대상으로 한다.
+    void UpdateRule(int ruleId, const rule::Rule& r);
+    void DeleteRule(int ruleId);
 
     void SavePoint(int ruleId, const rule::PointSample& point);
     std::vector<rule::PointSample> LoadPoints(int ruleId);
