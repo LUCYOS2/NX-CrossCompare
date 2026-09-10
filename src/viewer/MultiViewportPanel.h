@@ -42,6 +42,13 @@ public:
     // 동작한다(ModelViewport::pickModeActive_ 참고).
     void setPickModeActive(bool active);
 
+    // § 이미지 캡쳐 뷰어 설정(2026-09-10) - RuleEditorDialog가 측정 이미지 영역에서
+    // 메인 툴바를 직접 건드리지 않고도 단면뷰 on/off만 빠르게 전환할 수 있게. 축/좌표 등
+    // 세부 조정은 여전히 메인 툴바(단면 보기 컨트롤 바)에서 - 켜고 끄는 것만 빠른 길을
+    // 만든 것. 체크박스 토글 핸들러와 동일한 로직(초기 좌표 세팅 포함)을 재사용한다.
+    void setSectionEnabled(bool enabled);
+    bool sectionEnabled() const { return camera_.sectionEnabled; }
+
 signals:
     // 어느 뷰포트에서 찍었든 여기로 모여서 나간다 - RuleEditorDialog는 패널 하나에만
     // 연결하면 되고, 개별 ModelViewport를 알 필요가 없다.

@@ -185,8 +185,11 @@ std::vector<AnchorCandidate> StepGeometryAdapter::FindAnchorCandidates(
         const gp_Cylinder cylinder = surface.Cylinder();
         const gp_Ax1 axis = cylinder.Axis();
         const gp_Pnt center = axis.Location();
-        candidates.push_back(AnchorCandidate{
-            anchorType, partName, Vec3{center.X(), center.Y(), center.Z()}, cylinder.Radius() * 2.0});
+        const gp_Dir dir = axis.Direction();
+        AnchorCandidate candidate{
+            anchorType, partName, Vec3{center.X(), center.Y(), center.Z()}, cylinder.Radius() * 2.0};
+        candidate.axis = Vec3{dir.X(), dir.Y(), dir.Z()};
+        candidates.push_back(std::move(candidate));
     }
     return candidates;
 }

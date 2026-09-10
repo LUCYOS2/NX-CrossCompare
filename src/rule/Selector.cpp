@@ -1,6 +1,7 @@
 #include "rule/Selector.h"
 #include "rule/Measure.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 
@@ -17,6 +18,21 @@ double NormalDot(const geometry::Vec3& a, const geometry::Vec3& b) {
     return (a.x * b.x + a.y * b.y + a.z * b.z) / (lenA * lenB);
 }
 
+geometry::Vec3 AxisUnitVector(const std::string& axis) {
+    if (axis == "Y") return geometry::Vec3{0.0, 1.0, 0.0};
+    if (axis == "Z") return geometry::Vec3{0.0, 0.0, 1.0};
+    return geometry::Vec3{1.0, 0.0, 0.0}; // "X" 또는 알 수 없는 값의 기본값
+}
+
+// 방향 벡터 두 개 사이의 각도(도). 부호는 무시한다(±축 둘 다 "평행"으로 취급) - 원통
+// 축이나 평면 법선이 뒤집혀 있어도 실무적으로는 같은 방향이기 때문.
+double AngleBetweenDeg(const geometry::Vec3& a, const geometry::Vec3& b) {
+    constexpr double kPi = 3.14159265358979323846;
+    double cosAngle = std::abs(NormalDot(a, b));
+    cosAngle = std::min(1.0, std::max(-1.0, cosAngle));
+    return std::acos(cosAngle) * 180.0 / kPi;
+}
+
 } // namespace
 
 std::vector<geometry::AnchorCandidate> FilterByDiameter(
@@ -29,6 +45,40 @@ std::vector<geometry::AnchorCandidate> FilterByDiameter(
     std::vector<geometry::AnchorCandidate> filtered;
     for (auto& candidate : candidates) {
         if (std::abs(candidate.diameterMm - target) <= kDiameterMatchToleranceMm) {
+            filtered.push_back(std::move(candidate));
+        }
+    }
+    return filtered;
+}
+
+std::vector<geometry::AnchorCandidate> FilterByAxisDirection(
+    std::vector<geometry::AnchorCandidate> candidates,
+    const std::optional<std::string>& axis, const std::optional<double>& toleranceDeg) {
+    if (!axis.has_value() || axis->empty()) {
+        return candidates;
+    }
+    const geometry::Vec3 target = AxisUnitVector(*axis);
+    const double tolerance = toleranceDeg.value_or(kDefaultDirectionToleranceDeg);
+    std::vector<geometry::AnchorCandidate> filtered;
+    for (auto& candidate : candidates) {
+        if (AngleBetweenDeg(candidate.axis, target) <= tolerance) {
+            filtered.push_back(std::move(candidate));
+        }
+    }
+    return filtered;
+}
+
+std::vector<geometry::PlaneCandidate> FilterPlanesByNormal(
+    std::vector<geometry::PlaneCandidate> candidates,
+    const std::optional<std::string>& axis, const std::optional<double>& toleranceDeg) {
+    if (!axis.has_value() || axis->empty()) {
+        return candidates;
+    }
+    const geometry::Vec3 target = AxisUnitVector(*axis);
+    const double tolerance = toleranceDeg.value_or(kDefaultDirectionToleranceDeg);
+    std::vector<geometry::PlaneCandidate> filtered;
+    for (auto& candidate : candidates) {
+        if (AngleBetweenDeg(candidate.normal, target) <= tolerance) {
             filtered.push_back(std::move(candidate));
         }
     }

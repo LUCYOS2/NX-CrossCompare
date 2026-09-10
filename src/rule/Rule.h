@@ -14,6 +14,11 @@ struct Anchor {
     std::string partName;   // Bezel, Rear_Chassis, ...
     std::optional<std::string> paramKey;   // 예: "diameter"
     std::optional<double> paramValue;      // 예: 2.8
+    // § 축 방향 필터(2026-09-09) - paramKey/paramValue(지름)와 별개 필드라 동시에(AND)
+    // 적용 가능하다. "X"/"Y"/"Z" 중 하나, 비어있으면 필터 안 씀. 원통 축이 이 축과
+    // directionToleranceDeg(기본 5도) 이내로 평행한 후보만 남긴다.
+    std::optional<std::string> directionAxis;
+    std::optional<double> directionToleranceDeg;
 };
 
 enum class MeasurementType {
@@ -53,6 +58,11 @@ struct PointSample {
 struct PlaneRef {
     std::string planeType; // Datum_Plane 등
     std::string partName;
+    // § 법선 방향 필터(2026-09-09) - Anchor.directionAxis와 같은 취지, 평면 후보가
+    // 여럿일 때(§17 as1_pe.stp 실측 - Ø254mm 원통 58개처럼 평면도 후보가 많이 겹칠 수
+    // 있음) 법선이 이 축과 평행한 것만 남긴다.
+    std::optional<std::string> normalAxis;
+    std::optional<double> normalToleranceDeg;
 };
 
 // 개발계획_v2.md §7 Rule Schema. Anchor / Reference Frame / Selector / Measurement 4계층.

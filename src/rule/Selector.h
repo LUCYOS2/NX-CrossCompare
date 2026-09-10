@@ -23,6 +23,21 @@ std::vector<geometry::AnchorCandidate> FilterByDiameter(
     std::vector<geometry::AnchorCandidate> candidates,
     const std::optional<std::string>& paramKey, const std::optional<double>& paramValue);
 
+// § 축/법선 방향 필터(2026-09-09) - [[anchor-selection-criteria-gap]]에서 지름만으로는
+// 못 거르던 "같은 지름, 다른 축 방향" 후보를 구분하기 위해 추가. Anchor.paramKey/
+// paramValue(지름)와 별개 필드(Anchor.directionAxis/directionToleranceDeg)라 지름 필터와
+// 동시에(AND) 적용 가능하다. axis는 부호 없는 직선 방향으로 비교(±둘 다 "평행"으로 취급) -
+// 원통 축이나 평면 법선 모두 뒤집힌 방향이 실무적으로 같은 방향이기 때문.
+constexpr double kDefaultDirectionToleranceDeg = 5.0;
+
+std::vector<geometry::AnchorCandidate> FilterByAxisDirection(
+    std::vector<geometry::AnchorCandidate> candidates,
+    const std::optional<std::string>& axis, const std::optional<double>& toleranceDeg);
+
+std::vector<geometry::PlaneCandidate> FilterPlanesByNormal(
+    std::vector<geometry::PlaneCandidate> candidates,
+    const std::optional<std::string>& axis, const std::optional<double>& toleranceDeg);
+
 std::optional<std::pair<geometry::AnchorCandidate, geometry::AnchorCandidate>> SelectNearestPair(
     const std::vector<geometry::AnchorCandidate>& candidatesA,
     const std::vector<geometry::AnchorCandidate>& candidatesB);

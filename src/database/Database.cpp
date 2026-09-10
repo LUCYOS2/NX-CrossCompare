@@ -1,5 +1,7 @@
 #include "database/Database.h"
 
+#include "rule/Selector.h" // rule::kDefaultDirectionToleranceDeg
+
 #include <sqlite3.h>
 
 #include <stdexcept>
@@ -130,19 +132,28 @@ void Database::EnsureSchema() {
         throw std::runtime_error("failed to create schema: " + msg);
     }
 
-    // rules.image_path - § 이미지 캡쳐 연동(2026-09-09)에서 추가된 컬럼. 기존에 만들어진
-    // DB 파일에는 없을 수 있어 CREATE TABLE IF NOT EXISTS만으로는 채워지지 않으므로
-    // 별도 마이그레이션이 필요하다. 이미 컬럼이 있으면 "duplicate column" 에러가 나는데
-    // 그건 정상 상황(이미 마이그레이션됨)이라 무시하고, 그 외 에러만 던진다.
-    char* migrateErr = nullptr;
-    if (sqlite3_exec(db_, "ALTER TABLE rules ADD COLUMN image_path TEXT;", nullptr, nullptr, &migrateErr) !=
-        SQLITE_OK) {
-        const std::string msg = migrateErr ? migrateErr : "unknown error";
-        sqlite3_free(migrateErr);
-        if (msg.find("duplicate column") == std::string::npos) {
-            throw std::runtime_error("failed to migrate rules.image_path: " + msg);
+    // 기존 DB 파일에 없을 수 있는 컬럼들을 하나씩 추가 - CREATE TABLE IF NOT EXISTS로는
+    // 이미 만들어진 테이블에 새 컬럼을 채워주지 않아서 별도 마이그레이션이 필요하다.
+    // 이미 있으면 "duplicate column" 에러가 나는데 그건 정상 상황(이미 마이그레이션됨)
+    // 이라 무시하고, 그 외 에러만 던진다.
+    auto migrateColumn = [this](const char* alterSql) {
+        char* migrateErr = nullptr;
+        if (sqlite3_exec(db_, alterSql, nullptr, nullptr, &migrateErr) != SQLITE_OK) {
+            const std::string msg = migrateErr ? migrateErr : "unknown error";
+            sqlite3_free(migrateErr);
+            if (msg.find("duplicate column") == std::string::npos) {
+                throw std::runtime_error(std::string("failed to migrate schema (") + alterSql + "): " + msg);
+            }
         }
-    }
+    };
+    // rules.image_path - § 이미지 캡쳐 연동(2026-09-09).
+    migrateColumn("ALTER TABLE rules ADD COLUMN image_path TEXT;");
+    // rules.plane_normal_axis/plane_normal_tolerance_deg - § 법선 방향 필터(2026-09-09).
+    migrateColumn("ALTER TABLE rules ADD COLUMN plane_normal_axis TEXT;");
+    migrateColumn("ALTER TABLE rules ADD COLUMN plane_normal_tolerance_deg REAL;");
+    // rule_anchors.direction_axis/direction_tolerance_deg - § 축 방향 필터(2026-09-09).
+    migrateColumn("ALTER TABLE rule_anchors ADD COLUMN direction_axis TEXT;");
+    migrateColumn("ALTER TABLE rule_anchors ADD COLUMN direction_tolerance_deg REAL;");
 }
 
 int Database::CreateProject(const std::string& name) {
@@ -168,8 +179,9 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
     {
         Stmt stmt(db_,
             "INSERT INTO rules (project_id, name, measurement_type, projection, "
-            "tolerance_plus_mm, tolerance_minus_mm, plane_type, plane_part_name, image_path) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);");
+            "tolerance_plus_mm, tolerance_minus_mm, plane_type, plane_part_name, image_path, "
+            "plane_normal_axis, plane_normal_tolerance_deg) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
         stmt.BindInt(1, projectId);
         stmt.BindText(2, r.name);
         stmt.BindText(3, ToString(r.measurementType));
@@ -188,14 +200,22 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
         } else {
             stmt.BindNull(9);
         }
+        if (r.referencePlane.has_value() && r.referencePlane->normalAxis.has_value()) {
+            stmt.BindText(10, *r.referencePlane->normalAxis);
+            stmt.BindDouble(11, r.referencePlane->normalToleranceDeg.value_or(rule::kDefaultDirectionToleranceDeg));
+        } else {
+            stmt.BindNull(10);
+            stmt.BindNull(11);
+        }
         stmt.Step();
         ruleId = static_cast<int>(stmt.LastInsertRowId());
     }
 
     for (const auto& anchor : r.anchors) {
         Stmt stmt(db_,
-            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value) "
-            "VALUES (?, ?, ?, ?, ?, ?);");
+            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value, "
+            "direction_axis, direction_tolerance_deg) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
         stmt.BindInt(1, ruleId);
         stmt.BindText(2, anchor.role);
         stmt.BindText(3, anchor.anchorType);
@@ -206,6 +226,13 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
         } else {
             stmt.BindNull(5);
             stmt.BindNull(6);
+        }
+        if (anchor.directionAxis.has_value()) {
+            stmt.BindText(7, *anchor.directionAxis);
+            stmt.BindDouble(8, anchor.directionToleranceDeg.value_or(rule::kDefaultDirectionToleranceDeg));
+        } else {
+            stmt.BindNull(7);
+            stmt.BindNull(8);
         }
         stmt.Step();
     }
@@ -238,7 +265,8 @@ rule::Rule Database::LoadRule(int ruleId) {
     {
         Stmt stmt(db_,
             "SELECT name, measurement_type, projection, tolerance_plus_mm, tolerance_minus_mm, "
-            "plane_type, plane_part_name, image_path FROM rules WHERE id = ?;");
+            "plane_type, plane_part_name, image_path, plane_normal_axis, plane_normal_tolerance_deg "
+            "FROM rules WHERE id = ?;");
         stmt.BindInt(1, ruleId);
         if (!stmt.Step()) {
             throw std::runtime_error("rule not found: id=" + std::to_string(ruleId));
@@ -252,6 +280,10 @@ rule::Rule Database::LoadRule(int ruleId) {
             rule::PlaneRef planeRef;
             planeRef.planeType = stmt.ColumnText(5);
             planeRef.partName = stmt.ColumnText(6);
+            if (!stmt.IsNull(8)) {
+                planeRef.normalAxis = stmt.ColumnText(8);
+                planeRef.normalToleranceDeg = stmt.ColumnDouble(9);
+            }
             r.referencePlane = std::move(planeRef);
         }
         if (!stmt.IsNull(7)) {
@@ -261,7 +293,8 @@ rule::Rule Database::LoadRule(int ruleId) {
 
     {
         Stmt stmt(db_,
-            "SELECT role, anchor_type, part_name, param_key, param_value "
+            "SELECT role, anchor_type, part_name, param_key, param_value, "
+            "direction_axis, direction_tolerance_deg "
             "FROM rule_anchors WHERE rule_id = ? ORDER BY id;");
         stmt.BindInt(1, ruleId);
         while (stmt.Step()) {
@@ -272,6 +305,10 @@ rule::Rule Database::LoadRule(int ruleId) {
             if (!stmt.IsNull(3)) {
                 anchor.paramKey = stmt.ColumnText(3);
                 anchor.paramValue = stmt.ColumnDouble(4);
+            }
+            if (!stmt.IsNull(5)) {
+                anchor.directionAxis = stmt.ColumnText(5);
+                anchor.directionToleranceDeg = stmt.ColumnDouble(6);
             }
             r.anchors.push_back(std::move(anchor));
         }
@@ -346,7 +383,8 @@ std::vector<rule::PointSample> Database::LoadPoints(int ruleId) {
 void Database::UpdateRule(int ruleId, const rule::Rule& r) {
     Stmt stmt(db_,
         "UPDATE rules SET name = ?, measurement_type = ?, projection = ?, "
-        "tolerance_plus_mm = ?, tolerance_minus_mm = ?, plane_type = ?, plane_part_name = ?, image_path = ? "
+        "tolerance_plus_mm = ?, tolerance_minus_mm = ?, plane_type = ?, plane_part_name = ?, image_path = ?, "
+        "plane_normal_axis = ?, plane_normal_tolerance_deg = ? "
         "WHERE id = ?;");
     stmt.BindText(1, r.name);
     stmt.BindText(2, ToString(r.measurementType));
@@ -365,7 +403,14 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
     } else {
         stmt.BindNull(8);
     }
-    stmt.BindInt(9, ruleId);
+    if (r.referencePlane.has_value() && r.referencePlane->normalAxis.has_value()) {
+        stmt.BindText(9, *r.referencePlane->normalAxis);
+        stmt.BindDouble(10, r.referencePlane->normalToleranceDeg.value_or(rule::kDefaultDirectionToleranceDeg));
+    } else {
+        stmt.BindNull(9);
+        stmt.BindNull(10);
+    }
+    stmt.BindInt(11, ruleId);
     stmt.Step();
 
     // 자식 테이블(anchor/reference_frame/selector)은 개수·순서가 통째로 바뀔 수 있어서
@@ -378,8 +423,9 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
     }
     for (const auto& anchor : r.anchors) {
         Stmt ins(db_,
-            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value) "
-            "VALUES (?, ?, ?, ?, ?, ?);");
+            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value, "
+            "direction_axis, direction_tolerance_deg) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
         ins.BindInt(1, ruleId);
         ins.BindText(2, anchor.role);
         ins.BindText(3, anchor.anchorType);
@@ -390,6 +436,13 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
         } else {
             ins.BindNull(5);
             ins.BindNull(6);
+        }
+        if (anchor.directionAxis.has_value()) {
+            ins.BindText(7, *anchor.directionAxis);
+            ins.BindDouble(8, anchor.directionToleranceDeg.value_or(rule::kDefaultDirectionToleranceDeg));
+        } else {
+            ins.BindNull(7);
+            ins.BindNull(8);
         }
         ins.Step();
     }

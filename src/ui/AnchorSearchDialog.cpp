@@ -36,7 +36,7 @@ AnchorSearchDialog::AnchorSearchDialog(
     anchorType_->setPlaceholderText("Hole, Boss_Center ...");
     partName_ = new QLineEdit(this);
     diameter_ = new QDoubleSpinBox(this);
-    diameter_->setRange(0.0, 100.0);
+    diameter_->setRange(0.0, 1000.0); // 실측 Ø254mm(구조용 원통) 이상도 검색 가능해야 함
     diameter_->setDecimals(2);
     diameter_->setSuffix(" mm (0 = 필터 안 씀)");
 

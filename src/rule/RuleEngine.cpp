@@ -24,6 +24,15 @@ std::vector<geometry::AnchorCandidate> ApplyDiameterFilter(
     return FilterByDiameter(std::move(candidates), anchor.paramKey, anchor.paramValue);
 }
 
+// 지름 필터와 축 방향 필터를 함께 적용(AND) - Anchor가 별개 필드로 들고 있어서
+// 순서대로 걸어주기만 하면 된다.
+std::vector<geometry::AnchorCandidate> ApplyAnchorFilters(
+    std::vector<geometry::AnchorCandidate> candidates, const Anchor& anchor) {
+    candidates = ApplyDiameterFilter(std::move(candidates), anchor);
+    candidates = FilterByAxisDirection(std::move(candidates), anchor.directionAxis, anchor.directionToleranceDeg);
+    return candidates;
+}
+
 std::optional<geometry::AnchorCandidate> ResolveSingleAnchor(
     const std::vector<geometry::AnchorCandidate>& candidates, const std::vector<std::string>& selectors) {
     if (std::find(selectors.begin(), selectors.end(), "leftmost") != selectors.end()) {
@@ -79,8 +88,8 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
                 handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
             auto candidatesB = adapter.FindAnchorCandidates(
                 handle, rule.anchors[1].anchorType, rule.anchors[1].partName);
-            candidatesA = ApplyDiameterFilter(std::move(candidatesA), rule.anchors[0]);
-            candidatesB = ApplyDiameterFilter(std::move(candidatesB), rule.anchors[1]);
+            candidatesA = ApplyAnchorFilters(std::move(candidatesA), rule.anchors[0]);
+            candidatesB = ApplyAnchorFilters(std::move(candidatesB), rule.anchors[1]);
             const auto pair = ResolvePairAnchors(candidatesA, candidatesB, rule.selector);
             if (!pair) {
                 throw std::runtime_error(rule.name + ": failed to resolve anchor pair (ambiguous candidates)");
@@ -95,13 +104,15 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             }
             auto candidates = adapter.FindAnchorCandidates(
                 handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
-            candidates = ApplyDiameterFilter(std::move(candidates), rule.anchors[0]);
+            candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
             const auto resolved = ResolveSingleAnchor(candidates, rule.selector);
             if (!resolved) {
                 throw std::runtime_error(rule.name + ": failed to resolve anchor (ambiguous candidates)");
             }
-            const auto planes = adapter.FindPlaneCandidates(
+            auto planes = adapter.FindPlaneCandidates(
                 handle, rule.referencePlane->planeType, rule.referencePlane->partName);
+            planes = FilterPlanesByNormal(
+                std::move(planes), rule.referencePlane->normalAxis, rule.referencePlane->normalToleranceDeg);
             if (planes.empty()) {
                 throw std::runtime_error(rule.name + ": no plane candidate found");
             }
@@ -133,7 +144,7 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             }
             auto candidates = adapter.FindAnchorCandidates(
                 handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
-            candidates = ApplyDiameterFilter(std::move(candidates), rule.anchors[0]);
+            candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
             return static_cast<double>(candidates.size());
         }
         case MeasurementType::MinPitch: {
@@ -142,7 +153,7 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             }
             auto candidates = adapter.FindAnchorCandidates(
                 handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
-            candidates = ApplyDiameterFilter(std::move(candidates), rule.anchors[0]);
+            candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
             if (candidates.size() < 2) {
                 throw std::runtime_error(
                     rule.name + ": min_pitch needs at least 2 matching candidates (found " +

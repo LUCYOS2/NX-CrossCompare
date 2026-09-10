@@ -26,6 +26,10 @@ struct AnchorCandidate {
     // Rule의 Anchor.paramKey=="diameter"일 때 후보를 걸러내는 데 쓰인다(RuleEngine 참고) -
     // "비슷한 지름의 구멍만 다 찾기" 요청에 대응하는 필드.
     double diameterMm = 0.0;
+    // § 축 방향 필터(2026-09-09) - 원통의 축 방향(단위벡터 아님, 크기 무시하고 방향만
+    // 씀). "지름은 같은데 축 방향이 달라 실제로는 다른 형상"인 후보를 구분하는 데 쓰인다
+    // (as1_pe.stp 실측: Ø254mm 원통 58개가 지름만으로는 전혀 안 걸러졌던 문제).
+    Vec3 axis;
 };
 
 // point_to_plane 측정의 기준 평면 후보. 평면 위 한 점 + 법선벡터로 표현.

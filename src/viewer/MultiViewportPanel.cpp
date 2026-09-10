@@ -426,6 +426,22 @@ void MultiViewportPanel::setRenderMode(RenderMode mode) {
     }
 }
 
+// § 이미지 캡쳐 뷰어 설정 - 단면 보기 체크박스 토글 핸들러와 동일한 로직(켤 때 좌표를
+// 현재 축의 bbox 중심으로 초기화)을 그대로 재사용 - 메인 툴바 체크박스와 RuleEditorDialog의
+// 단축 체크박스 어느 쪽에서 켜도 똑같이 동작해야 하므로.
+void MultiViewportPanel::setSectionEnabled(bool enabled) {
+    camera_.sectionEnabled = enabled;
+    if (enabled) {
+        const auto box = unionBoxOfHandles();
+        camera_.sectionCoord = static_cast<float>(
+            (AxisMin(box, camera_.sectionAxis) + AxisMax(box, camera_.sectionAxis)) * 0.5);
+    }
+    for (auto* vp : viewports_) {
+        vp->update();
+    }
+    syncSectionControlsFromCamera();
+}
+
 // § 화면설정 - 뷰포트 조작 모드. true(기본값)면 전체 뷰포트가 같은 camera_를 공유해서
 // 동시에 회전/팬/줌 된다. false면 각 뷰포트가 자기 localCamera_로 독립 조작된다
 // (ModelViewport::ActiveTransform 참고). 켜는 순간에는 각 뷰포트의 로컬 카메라를 현재
