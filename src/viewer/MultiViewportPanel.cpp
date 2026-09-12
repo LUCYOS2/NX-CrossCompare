@@ -53,6 +53,7 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
     outerLayout->setSpacing(0);
 
     outerLayout->addWidget(buildSectionControlBar());
+    outerLayout->addWidget(buildViewPresetBar());
 
     auto* gridContainer = new QWidget(this);
     auto* grid = new QGridLayout(gridContainer);
@@ -86,6 +87,8 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
         auto* viewport = new ModelViewport(adapter, handle, &camera_, container);
         viewport->SetIndependentModePtr(&independentMode_);
         viewport->SetPickModePtr(&pickModeActive_);
+        viewport->SetCaptureRegionModePtr(&captureRegionModeActive_);
+        viewport->SetCameraLockedPtr(&cameraLocked_);
         viewports_.push_back(viewport);
 
         vbox->addWidget(labelWidget);
@@ -98,12 +101,20 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
             // 단축키(H/X/Y/Z/+/-)로 바뀐 상태를 컨트롤 바에도 반영 - 두 입력 경로가 같은
             // Camera를 공유하므로 여기서 한 번에 동기화한다.
             syncSectionControlsFromCamera();
+            // § 카메라 회전 시 치수선 축 자동 재선택 - RuleEditorDialog가 이 신호를 받아
+            // "화면에 더 잘 보이는 축"으로 오프셋을 다시 고를 수 있게 바깥으로도 내보낸다.
+            emit cameraChanged();
         });
         connect(viewport, &ModelViewport::hoverEntered, this, [this, viewport]() {
             hoveredViewport_ = viewport;
         });
         // § 3D 클릭 피킹 - 어느 뷰포트에서 찍었든 패널의 facePicked 하나로 모아서 내보낸다.
         connect(viewport, &ModelViewport::facePicked, this, &MultiViewportPanel::facePicked);
+        // § 캡쳐 영역 드래그 지정 - 마찬가지로 패널의 captureRegionGrabbed 하나로 모은다.
+        connect(viewport, &ModelViewport::captureRegionGrabbed, this, &MultiViewportPanel::captureRegionGrabbed);
+        // § 치수선 드래그 - 마찬가지로 패널의 dimensionOffsetDragged 하나로 모은다.
+        connect(viewport, &ModelViewport::dimensionOffsetDragged, this,
+                &MultiViewportPanel::dimensionOffsetDragged);
 
         const int row = placed / columns;
         const int col = placed % columns;
@@ -152,7 +163,16 @@ void MultiViewportPanel::setupShortcuts() {
             }
         }
         auto* shortcut = new QShortcut(keySequence, shortcutScope);
-        shortcut->setContext(Qt::WidgetWithChildrenShortcut);
+        // § "F가 안 먹는다" 리포트(2026-09-13) - WidgetWithChildrenShortcut은 "shortcutScope
+        // (MainWindow) 서브트리 안의 '어떤 위젯이 실제 키보드 포커스를 갖고 있을 때'"만
+        // 발동한다. 규칙 관리 다이얼로그(별도 톱레벨 창)를 열었다 닫는 등으로 MainWindow
+        // 쪽에 포커스를 가진 위젯이 하나도 없는 상태가 되면(Qt가 포커스를 아무 데도 다시
+        // 돌려주지 않는 경우가 흔함) 이 조건을 만족하는 위젯이 없어 F/H/I가 전혀 안 먹는다.
+        // WindowShortcut은 "이 위젯이 속한 톱레벨 창이 지금 활성 창이면" 발동하므로 포커스가
+        // MainWindow 안 어디에도 없어도 문제없다 - 그러면서도 RuleEditorDialog는 별도
+        // 톱레벨 창이라 그게 활성 창일 땐 여전히 안 먹으므로(텍스트 입력 방해 없음) 위
+        // 주석의 원래 목적은 그대로 유지된다.
+        shortcut->setContext(Qt::WindowShortcut);
         connect(shortcut, &QShortcut::activated, this, slot);
         return shortcut;
     };
@@ -304,6 +324,36 @@ QWidget* MultiViewportPanel::buildSectionControlBar() {
     return bar;
 }
 
+// § 뷰 프리셋(2026-09-11) - 단면 컨트롤 바와 별개 행으로 둔다. 6개 평면뷰 + ISO를 전부
+// 같은 줄에 욱여넣으면 단면 컨트롤(축/슬라이더 등)과 합쳐 화면 폭을 넘어갈 수 있어서
+// 분리했다. 토글 상태를 유지할 필요가 없는 1회성 액션이라(단면 축 버튼과 달리) 멤버로
+// 안 갖고 로컬 변수로 충분하다.
+QWidget* MultiViewportPanel::buildViewPresetBar() {
+    auto* bar = new QWidget(this);
+    auto* layout = new QHBoxLayout(bar);
+    layout->setContentsMargins(8, 4, 8, 4);
+
+    layout->addWidget(new QLabel("뷰:", bar));
+    struct PresetButton {
+        const char* label;
+        void (MultiViewportPanel::*slot)();
+    };
+    const PresetButton presets[] = {
+        {"XY", &MultiViewportPanel::snapToXYView},     {"-XY", &MultiViewportPanel::snapToNegXYView},
+        {"YZ", &MultiViewportPanel::snapToYZView},     {"-YZ", &MultiViewportPanel::snapToNegYZView},
+        {"XZ", &MultiViewportPanel::snapToXZView},     {"-XZ", &MultiViewportPanel::snapToNegXZView},
+        {"ISO", &MultiViewportPanel::resetToIsoView},
+    };
+    for (const auto& preset : presets) {
+        auto* button = new QPushButton(preset.label, bar);
+        connect(button, &QPushButton::clicked, this, preset.slot);
+        layout->addWidget(button);
+    }
+    layout->addStretch(1);
+
+    return bar;
+}
+
 // 컨트롤 위젯 상태를 camera_에서 다시 읽어와 맞춘다 - 키보드 단축키로 바뀐 값도
 // 이 함수 하나로 체크박스/축 버튼/방향 반전/슬라이더/스핀박스에 전부 반영된다.
 void MultiViewportPanel::syncSectionControlsFromCamera() {
@@ -370,6 +420,45 @@ geometry::BoundingBox MultiViewportPanel::unionBoxOfHandles() const {
 void MultiViewportPanel::resetToIsoView() {
     camera_.yawDeg = 45.0f;
     camera_.pitchDeg = 35.264f;
+    fitToView();
+}
+
+// § 뷰 프리셋(2026-09-11) - 각도 유도는 헤더의 클래스 선언부 주석 참고. 6개 다 같은
+// 패턴(회전만 바꾸고 fitToView()로 다시 맞춤)이라 각각은 두 줄뿐이다.
+void MultiViewportPanel::snapToXYView() {
+    camera_.yawDeg = 0.0f;
+    camera_.pitchDeg = 0.0f;
+    fitToView();
+}
+
+void MultiViewportPanel::snapToNegXYView() {
+    camera_.yawDeg = 180.0f;
+    camera_.pitchDeg = 0.0f;
+    fitToView();
+}
+
+void MultiViewportPanel::snapToYZView() {
+    camera_.yawDeg = 90.0f;
+    camera_.pitchDeg = 0.0f;
+    fitToView();
+}
+
+void MultiViewportPanel::snapToNegYZView() {
+    camera_.yawDeg = -90.0f;
+    camera_.pitchDeg = 0.0f;
+    fitToView();
+}
+
+void MultiViewportPanel::snapToXZView() {
+    camera_.yawDeg = 0.0f;
+    camera_.pitchDeg = 90.0f;
+    fitToView();
+}
+
+void MultiViewportPanel::snapToNegXZView() {
+    // 의도적 예외 - 헤더 주석 참고("pitch는 반드시 양수" 규칙은 이 뷰엔 적용 안 됨).
+    camera_.yawDeg = 0.0f;
+    camera_.pitchDeg = -90.0f;
     fitToView();
 }
 
@@ -457,6 +546,52 @@ void MultiViewportPanel::setSyncedManipulation(bool synced) {
 
 void MultiViewportPanel::setPickModeActive(bool active) {
     pickModeActive_ = active;
+}
+
+QPixmap MultiViewportPanel::grabActiveViewport() {
+    if (!hoveredViewport_) {
+        return QPixmap();
+    }
+    return hoveredViewport_->grabViewportPixmap();
+}
+
+void MultiViewportPanel::setCaptureRegionModeActive(bool active) {
+    captureRegionModeActive_ = active;
+}
+
+void MultiViewportPanel::setCameraLocked(bool locked) {
+    cameraLocked_ = locked;
+}
+
+void MultiViewportPanel::SetMarkerPositions(const std::vector<QVector3D>& worldPositions) {
+    for (auto* vp : viewports_) {
+        vp->SetMarkerPositions(worldPositions);
+    }
+}
+
+void MultiViewportPanel::SetDimensionLabel(const QString& text) {
+    for (auto* vp : viewports_) {
+        vp->SetDimensionLabel(text);
+    }
+}
+
+void MultiViewportPanel::SetDimensionExtensionLines(
+    const std::vector<QVector3D>& fromPoints, const std::vector<QVector3D>& toPoints) {
+    for (auto* vp : viewports_) {
+        vp->SetDimensionExtensionLines(fromPoints, toPoints);
+    }
+}
+
+void MultiViewportPanel::SetDimensionLine(const std::vector<QVector3D>& worldPoints) {
+    for (auto* vp : viewports_) {
+        vp->SetDimensionLine(worldPoints);
+    }
+}
+
+void MultiViewportPanel::SetDimensionOffsetAxis(const QVector3D& axisDirWorld) {
+    for (auto* vp : viewports_) {
+        vp->SetDimensionOffsetAxis(axisDirWorld);
+    }
 }
 
 } // namespace viewer

@@ -31,6 +31,10 @@ public:
     BoundingBox GetBoundingBox(ModelHandle handle) const override;
     std::vector<Vec3> GetVertices(ModelHandle handle) const override;
     std::vector<Vec3> GetRenderTriangles(ModelHandle handle) const override;
+    // § 불필요한 선 정리(2026-09-11) - 삼각형 대각선이 아니라 실제 B-rep 엣지만 반환한다
+    // (IGeometryAdapter.h 주석 참고). GCPnts_QuasiUniformDeflection으로 각 엣지를
+    // 면 테셀레이션과 같은 deflection으로 따로 샘플링한다.
+    std::vector<Vec3> GetRenderEdges(ModelHandle handle) const override;
 
     std::vector<AnchorCandidate> FindAnchorCandidates(
         ModelHandle handle, const std::string& anchorType, const std::string& partName) const override;

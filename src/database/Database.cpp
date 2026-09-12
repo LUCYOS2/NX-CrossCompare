@@ -154,6 +154,10 @@ void Database::EnsureSchema() {
     // rule_anchors.direction_axis/direction_tolerance_deg - § 축 방향 필터(2026-09-09).
     migrateColumn("ALTER TABLE rule_anchors ADD COLUMN direction_axis TEXT;");
     migrateColumn("ALTER TABLE rule_anchors ADD COLUMN direction_tolerance_deg REAL;");
+    // rules.ctq_code - § CTQ 관리항목 코드(2026-09-11).
+    migrateColumn("ALTER TABLE rules ADD COLUMN ctq_code TEXT;");
+    // rules.check_point_category - § Check Point 분류(2026-09-11).
+    migrateColumn("ALTER TABLE rules ADD COLUMN check_point_category TEXT;");
 }
 
 int Database::CreateProject(const std::string& name) {
@@ -180,8 +184,8 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
         Stmt stmt(db_,
             "INSERT INTO rules (project_id, name, measurement_type, projection, "
             "tolerance_plus_mm, tolerance_minus_mm, plane_type, plane_part_name, image_path, "
-            "plane_normal_axis, plane_normal_tolerance_deg) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+            "plane_normal_axis, plane_normal_tolerance_deg, ctq_code, check_point_category) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
         stmt.BindInt(1, projectId);
         stmt.BindText(2, r.name);
         stmt.BindText(3, ToString(r.measurementType));
@@ -206,6 +210,16 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
         } else {
             stmt.BindNull(10);
             stmt.BindNull(11);
+        }
+        if (r.ctqCode.has_value() && !r.ctqCode->empty()) {
+            stmt.BindText(12, *r.ctqCode);
+        } else {
+            stmt.BindNull(12);
+        }
+        if (r.checkPointCategory.has_value() && !r.checkPointCategory->empty()) {
+            stmt.BindText(13, *r.checkPointCategory);
+        } else {
+            stmt.BindNull(13);
         }
         stmt.Step();
         ruleId = static_cast<int>(stmt.LastInsertRowId());
@@ -265,7 +279,8 @@ rule::Rule Database::LoadRule(int ruleId) {
     {
         Stmt stmt(db_,
             "SELECT name, measurement_type, projection, tolerance_plus_mm, tolerance_minus_mm, "
-            "plane_type, plane_part_name, image_path, plane_normal_axis, plane_normal_tolerance_deg "
+            "plane_type, plane_part_name, image_path, plane_normal_axis, plane_normal_tolerance_deg, ctq_code, "
+            "check_point_category "
             "FROM rules WHERE id = ?;");
         stmt.BindInt(1, ruleId);
         if (!stmt.Step()) {
@@ -288,6 +303,12 @@ rule::Rule Database::LoadRule(int ruleId) {
         }
         if (!stmt.IsNull(7)) {
             r.imagePath = stmt.ColumnText(7);
+        }
+        if (!stmt.IsNull(10)) {
+            r.ctqCode = stmt.ColumnText(10);
+        }
+        if (!stmt.IsNull(11)) {
+            r.checkPointCategory = stmt.ColumnText(11);
         }
     }
 
@@ -384,7 +405,7 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
     Stmt stmt(db_,
         "UPDATE rules SET name = ?, measurement_type = ?, projection = ?, "
         "tolerance_plus_mm = ?, tolerance_minus_mm = ?, plane_type = ?, plane_part_name = ?, image_path = ?, "
-        "plane_normal_axis = ?, plane_normal_tolerance_deg = ? "
+        "plane_normal_axis = ?, plane_normal_tolerance_deg = ?, ctq_code = ? "
         "WHERE id = ?;");
     stmt.BindText(1, r.name);
     stmt.BindText(2, ToString(r.measurementType));
@@ -410,7 +431,12 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
         stmt.BindNull(9);
         stmt.BindNull(10);
     }
-    stmt.BindInt(11, ruleId);
+    if (r.ctqCode.has_value() && !r.ctqCode->empty()) {
+        stmt.BindText(11, *r.ctqCode);
+    } else {
+        stmt.BindNull(11);
+    }
+    stmt.BindInt(12, ruleId);
     stmt.Step();
 
     // 자식 테이블(anchor/reference_frame/selector)은 개수·순서가 통째로 바뀔 수 있어서

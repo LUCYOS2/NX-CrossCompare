@@ -91,7 +91,7 @@ private:
     bool currentSyncedManipulation_ = true;
 
     // § 3D 클릭 피킹 - 비모달로 바뀌면서 동시에 두 개 뜨는 걸 막고, STEP 재로드 시
-    // RewireViewerPanel로 다시 연결해주기 위해 열려있는 인스턴스를 계속 들고 있는다.
+    // RewireModels로 다시 연결해주기 위해 열려있는 인스턴스를 계속 들고 있는다.
     RuleEditorDialog* activeRuleDialog_ = nullptr;
 };
 

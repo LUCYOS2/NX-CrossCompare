@@ -80,6 +80,13 @@ struct Rule {
     // § 이미지 캡쳐 연동(2026-09-09) - CTQ 관리서처럼 규칙별 측정 포인트 그림을 남기기
     // 위해 3D 뷰 캡쳐본 파일 경로를 규칙에 붙여둔다. 없으면 nullopt(이미지 없음).
     std::optional<std::string> imagePath;
+    // § CTQ 관리항목 코드(2026-09-11) - "치수 표시선 옆에 CTQ 관리항목 D 이런식으로 입력할
+    // 수 있는 칸이 있으면 좋겠다"는 요청. CTQ 문서의 항목 기호(D, E-1 등)를 규칙에 붙여둔다.
+    // 없으면 nullopt.
+    std::optional<std::string> ctqCode;
+    // § Check Point 분류(2026-09-11) - "Dimension/Height/Angle 등으로 분류하자"는 요청.
+    // 포인트별이 아니라 규칙(측정 항목) 전체에 하나만 붙는다(사용자 확인 완료).
+    std::optional<std::string> checkPointCategory;
 };
 
 } // namespace rule

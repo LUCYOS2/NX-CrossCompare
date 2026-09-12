@@ -1,5 +1,7 @@
 #include "rule/BuiltInCatalog.h"
 
+#include <algorithm>
+
 namespace rule {
 
 std::vector<Rule> BuiltInRules() {
@@ -16,118 +18,31 @@ std::vector<Rule> BuiltInRules() {
         rules.push_back(r);
     }
 
-    // 001. Boss-Screw 체결 정렬 (docs/rule_catalog.md)
-    {
-        Rule r;
-        r.name = "001. Boss-Screw 체결 정렬";
-        r.anchors = {
-            Anchor{"A", "Hole", "Bezel", std::optional<std::string>("diameter"), std::optional<double>(2.8)},
-            Anchor{"B", "Boss_Center", "Rear_Chassis", std::optional<std::string>("diameter"), std::optional<double>(2.6)},
-        };
-        r.referenceFrame = {"World_Origin", "Datum_CSYS"};
-        r.selector = {"nearest_pair"};
-        r.measurementType = MeasurementType::PointToPoint;
-        r.projection = "3D";
-        r.tolerancePlusMm = 0.15;
-        r.toleranceMinusMm = 0.15;
-        rules.push_back(r);
-    }
-
-    // 002. 후크 높이
-    {
-        Rule r;
-        r.name = "002. 후크 높이";
-        r.anchors = {
-            Anchor{"single", "Hook_Tip_Edge", "Side_Frame", std::nullopt, std::nullopt},
-        };
-        r.referencePlane = PlaneRef{"Datum_Plane", "Rear_Chassis"};
-        r.referenceFrame = {"World_Origin"};
-        r.selector = {"leftmost"};
-        r.measurementType = MeasurementType::PointToPlane;
-        r.projection = "normal";
-        r.tolerancePlusMm = 0.1;
-        r.toleranceMinusMm = 0.1;
-        rules.push_back(r);
-    }
-
-    // 003. 후크 걸림량 (전장길이류) - selector 없음: anchor당 단일 후보 전제
-    {
-        Rule r;
-        r.name = "003. 후크 걸림량";
-        r.anchors = {
-            Anchor{"A", "Hook_Catch_Edge", "Side_Frame", std::nullopt, std::nullopt},
-            Anchor{"B", "Wall_Inner_Edge", "Front_Bezel", std::nullopt, std::nullopt},
-        };
-        r.referenceFrame = {"World_Origin"};
-        r.measurementType = MeasurementType::AxisProjection;
-        r.projection = "Z";
-        r.tolerancePlusMm = 0.3;
-        r.toleranceMinusMm = 0.1;
-        rules.push_back(r);
-    }
-
-    // 004. Rib-OpenCell Gap - selector: nearest_face_pair
-    {
-        Rule r;
-        r.name = "004. Rib-OpenCell Gap";
-        r.anchors = {
-            Anchor{"A", "Rib_Top_Surface", "Rib", std::nullopt, std::nullopt},
-            Anchor{"B", "OpenCell_Edge", "OpenCell", std::nullopt, std::nullopt},
-        };
-        r.referenceFrame = {"World_Origin"};
-        r.selector = {"nearest_face_pair"};
-        r.measurementType = MeasurementType::FaceToFaceGap;
-        r.tolerancePlusMm = 0.2;
-        r.toleranceMinusMm = 0.2;
-        rules.push_back(r);
-    }
-
-    // 005. 살두께 (Boss Root Wall Thickness) - selector: parallel_face_pair
-    {
-        Rule r;
-        r.name = "005. 살두께";
-        r.anchors = {
-            Anchor{"A", "Boss_Outer_Wall", "Boss", std::nullopt, std::nullopt},
-            Anchor{"B", "Boss_Inner_Wall", "Boss", std::nullopt, std::nullopt},
-        };
-        r.referenceFrame = {"World_Origin"};
-        r.selector = {"parallel_face_pair"};
-        r.measurementType = MeasurementType::FaceToFaceGap;
-        r.projection = "normal";
-        r.tolerancePlusMm = 0.05;
-        r.toleranceMinusMm = 0.05;
-        rules.push_back(r);
-    }
-
-    // 006. 구멍 개수 - 지오메트리 인식 파이프라인 검증용(§ 화면설정 다음 작업, Pitch
-    // 논의). anchor_type="Hole"은 StepGeometryAdapter가 이미 원통면 전부를 후보로
-    // 반환하므로, diameter 필터 없이도 실제 STEP 샘플에서 바로 개수가 나온다.
-    {
-        Rule r;
-        r.name = "006. 구멍 개수 (Hole)";
-        r.anchors = {Anchor{"single", "Hole", "", std::nullopt, std::nullopt}};
-        r.referenceFrame = {"World_Origin"};
-        r.measurementType = MeasurementType::InstanceCount;
-        rules.push_back(r);
-    }
-
-    // 007. 구멍 최소 간격 (Pitch) - X축 기준 정렬 후 인접 간격 중 최솟값. 후크 간격
-    // 측정을 위해 설계했지만 Hook_Tip_Edge 인식이 아직 없어서(§ 논의), 이미 되는
-    // Hole로 먼저 파이프라인 자체를 검증한다 - 나중에 후크 인식이 생기면 anchor_type만
-    // 바꿔 끼우면 된다.
-    {
-        Rule r;
-        r.name = "007. 구멍 최소 간격 (Pitch, X축)";
-        r.anchors = {Anchor{"single", "Hole", "", std::nullopt, std::nullopt}};
-        r.referenceFrame = {"World_Origin"};
-        r.measurementType = MeasurementType::MinPitch;
-        r.projection = "X";
-        r.tolerancePlusMm = 0.1;
-        r.toleranceMinusMm = 0.1;
-        rules.push_back(r);
-    }
+    // § 예시 카탈로그 정리(2026-09-11) - "Boss-Screw/후크/Rib 항목은 삭제하고 전장
+    // 사이즈만 남겨달라"는 요청. 실제 대상 모델에는 Hole만 있고 Hook/Boss/Rib류 형상이
+    // 없어서(사용자 확인) 이 문서 예시(docs/rule_catalog.md) 기반 규칙들은 실제로는 항상
+    // 매칭 실패만 나고 "치수 비교 테이블"만 어지럽혔다. 이런 형상별 규칙은 이제 사용자가
+    // "규칙 관리 > + 새 규칙 추가"(RuleEditorDialog, 라이브 3D 피킹)로 직접 만든다 -
+    // 앱이 미리 하드코딩해서 보여줄 이유가 없다. Boss-Screw/후크/Rib/살두께 규칙
+    // 정의였던 코드(PointToPoint/PointToPlane/AxisProjection/FaceToFaceGap x2 측정
+    // 로직 테스트용)는 rule_engine_tests.cpp로 옮겨서 엔진 자체 테스트 커버리지는
+    // 그대로 유지한다.
 
     return rules;
+}
+
+std::vector<Rule> MergeWithBuiltIns(const std::vector<Rule>& userRules) {
+    std::vector<Rule> merged = BuiltInRules();
+    for (const auto& userRule : userRules) {
+        auto it = std::find_if(merged.begin(), merged.end(),
+                                [&](const Rule& r) { return r.name == userRule.name; });
+        if (it != merged.end()) {
+            *it = userRule; // 이름이 같은 사용자 저장본이 내장 기본값을 덮어씀
+        } else {
+            merged.push_back(userRule);
+        }
+    }
+    return merged;
 }
 
 } // namespace rule

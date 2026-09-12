@@ -41,6 +41,9 @@ public:
     std::string AnchorType() const;
     std::string PartName() const;
     double Diameter() const;
+    // § 리스트 항목 분류(2026-09-11) - "INCH(적용 인치)" 열을 채우려면 검색으로 추가한
+    // 포인트도 어느 인치 대상이었는지 알아야 한다.
+    geometry::ModelHandle SelectedModelHandle() const;
 
 private slots:
     void onSearchClicked();

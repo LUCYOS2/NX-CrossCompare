@@ -90,6 +90,14 @@ double AnchorSearchDialog::Diameter() const {
     return diameter_->value();
 }
 
+geometry::ModelHandle AnchorSearchDialog::SelectedModelHandle() const {
+    const int index = modelCombo_->currentIndex();
+    if (index < 0 || index >= static_cast<int>(models_.size())) {
+        return geometry::kInvalidModelHandle;
+    }
+    return models_[static_cast<size_t>(index)].second;
+}
+
 void AnchorSearchDialog::onSearchClicked() {
     const int index = modelCombo_->currentIndex();
     if (index < 0 || index >= static_cast<int>(models_.size())) {

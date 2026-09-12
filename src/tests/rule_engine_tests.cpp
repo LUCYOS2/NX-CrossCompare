@@ -27,6 +27,88 @@ std::map<int, geometry::ModelHandle> LoadAllInches(geometry::MockGeometryAdapter
     return handles;
 }
 
+// § 예시 카탈로그 정리(2026-09-11) - Boss-Screw/후크/Rib/살두께는 실제 대상 모델(Hole만
+// 있고 Hook/Boss/Rib류 형상 없음)과 안 맞아 rule::BuiltInRules()에서 빠졌다(사용자
+// 요청). 그래도 이 규칙들이 대표하는 측정 로직(nearest_pair, point_to_plane,
+// axis_projection, nearest_face_pair, parallel_face_pair)은 계속 검증해야 하므로, 예전
+// BuiltInCatalog.cpp에 있던 정의를 그대로 여기로 옮겨 테스트 전용 픽스처로 쓴다.
+rule::Rule MakeBossScrewRule() {
+    rule::Rule r;
+    r.name = "001. Boss-Screw 체결 정렬";
+    r.anchors = {
+        rule::Anchor{"A", "Hole", "Bezel", std::optional<std::string>("diameter"), std::optional<double>(2.8)},
+        rule::Anchor{
+            "B", "Boss_Center", "Rear_Chassis", std::optional<std::string>("diameter"), std::optional<double>(2.6)},
+    };
+    r.referenceFrame = {"World_Origin", "Datum_CSYS"};
+    r.selector = {"nearest_pair"};
+    r.measurementType = rule::MeasurementType::PointToPoint;
+    r.projection = "3D";
+    r.tolerancePlusMm = 0.15;
+    r.toleranceMinusMm = 0.15;
+    return r;
+}
+
+rule::Rule MakeHookHeightRule() {
+    rule::Rule r;
+    r.name = "002. 후크 높이";
+    r.anchors = {rule::Anchor{"single", "Hook_Tip_Edge", "Side_Frame", std::nullopt, std::nullopt}};
+    r.referencePlane = rule::PlaneRef{"Datum_Plane", "Rear_Chassis"};
+    r.referenceFrame = {"World_Origin"};
+    r.selector = {"leftmost"};
+    r.measurementType = rule::MeasurementType::PointToPlane;
+    r.projection = "normal";
+    r.tolerancePlusMm = 0.1;
+    r.toleranceMinusMm = 0.1;
+    return r;
+}
+
+rule::Rule MakeHookCatchRule() {
+    rule::Rule r;
+    r.name = "003. 후크 걸림량";
+    r.anchors = {
+        rule::Anchor{"A", "Hook_Catch_Edge", "Side_Frame", std::nullopt, std::nullopt},
+        rule::Anchor{"B", "Wall_Inner_Edge", "Front_Bezel", std::nullopt, std::nullopt},
+    };
+    r.referenceFrame = {"World_Origin"};
+    r.measurementType = rule::MeasurementType::AxisProjection;
+    r.projection = "Z";
+    r.tolerancePlusMm = 0.3;
+    r.toleranceMinusMm = 0.1;
+    return r;
+}
+
+rule::Rule MakeRibOpenCellGapRule() {
+    rule::Rule r;
+    r.name = "004. Rib-OpenCell Gap";
+    r.anchors = {
+        rule::Anchor{"A", "Rib_Top_Surface", "Rib", std::nullopt, std::nullopt},
+        rule::Anchor{"B", "OpenCell_Edge", "OpenCell", std::nullopt, std::nullopt},
+    };
+    r.referenceFrame = {"World_Origin"};
+    r.selector = {"nearest_face_pair"};
+    r.measurementType = rule::MeasurementType::FaceToFaceGap;
+    r.tolerancePlusMm = 0.2;
+    r.toleranceMinusMm = 0.2;
+    return r;
+}
+
+rule::Rule MakeWallThicknessRule() {
+    rule::Rule r;
+    r.name = "005. 살두께";
+    r.anchors = {
+        rule::Anchor{"A", "Boss_Outer_Wall", "Boss", std::nullopt, std::nullopt},
+        rule::Anchor{"B", "Boss_Inner_Wall", "Boss", std::nullopt, std::nullopt},
+    };
+    r.referenceFrame = {"World_Origin"};
+    r.selector = {"parallel_face_pair"};
+    r.measurementType = rule::MeasurementType::FaceToFaceGap;
+    r.projection = "normal";
+    r.tolerancePlusMm = 0.05;
+    r.toleranceMinusMm = 0.05;
+    return r;
+}
+
 void TestNearestPairPicksTrueMatchAmongDistractors() {
     geometry::MockGeometryAdapter adapter;
     const auto handle = adapter.LoadModel("55inch.jt");
@@ -49,8 +131,7 @@ void TestNearestPairPicksTrueMatchAmongDistractors() {
 void TestBossScrewRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInRules();
-    const auto& bossScrewRule = rules[3];
+    const auto bossScrewRule = MakeBossScrewRule();
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, bossScrewRule);
     Check(results.size() == handles.size(), "should have one result per inch");
@@ -65,8 +146,7 @@ void TestBossScrewRuleAcrossInches() {
 void TestHookHeightRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInRules();
-    const auto& hookHeightRule = rules[4];
+    const auto hookHeightRule = MakeHookHeightRule();
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, hookHeightRule);
     for (const auto& r : results) {
@@ -78,8 +158,7 @@ void TestHookHeightRuleAcrossInches() {
 void TestHookCatchRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInRules();
-    const auto& hookCatchRule = rules[5];
+    const auto hookCatchRule = MakeHookCatchRule();
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, hookCatchRule);
     for (const auto& r : results) {
@@ -91,8 +170,7 @@ void TestHookCatchRuleAcrossInches() {
 void TestRibOpenCellGapRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInRules();
-    const auto& ribGapRule = rules[6];
+    const auto ribGapRule = MakeRibOpenCellGapRule();
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, ribGapRule);
     for (const auto& r : results) {
@@ -104,8 +182,7 @@ void TestRibOpenCellGapRuleAcrossInches() {
 void TestWallThicknessRuleAcrossInches() {
     geometry::MockGeometryAdapter adapter;
     const auto handles = LoadAllInches(adapter);
-    const auto rules = rule::BuiltInRules();
-    const auto& wallThicknessRule = rules[7];
+    const auto wallThicknessRule = MakeWallThicknessRule();
 
     const auto results = rule::RuleEngine::Evaluate(adapter, handles, wallThicknessRule);
     for (const auto& r : results) {

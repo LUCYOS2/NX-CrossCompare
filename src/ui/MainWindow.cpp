@@ -153,7 +153,8 @@ std::vector<std::pair<std::string, geometry::ModelHandle>> MainWindow::BuildLoad
     std::vector<std::pair<std::string, geometry::ModelHandle>> models;
     for (const auto& entry : inchFiles_) {
         const QString label = entry.inch > 0
-            ? QString("%1\"  %2").arg(entry.inch).arg(QFileInfo(QString::fromStdString(entry.filePath)).fileName())
+            ? QString("%1  %2").arg(ui::FormatInchLabel(entry.inch)).arg(
+                  QFileInfo(QString::fromStdString(entry.filePath)).fileName())
             : QFileInfo(QString::fromStdString(entry.filePath)).fileName();
         models.push_back({label.toStdString(), entry.handle});
     }
@@ -165,11 +166,11 @@ void MainWindow::setupCentralViewer() {
     setCentralWidget(panel);
     viewerPanel_ = panel;
     applyDisplaySettingsToCurrentPanel();
-    // 규칙 관리가 비모달로 열려 있는 동안 STEP을 다시 불러오면 이전 패널이 통째로
-    // 교체된다 - 다이얼로그가 그 패널을 가리키던 포인터를 계속 들고 있으면 댕글링되므로
-    // 새 패널로 다시 연결해준다.
+    // 규칙 관리가 비모달로 열려 있는 동안 STEP을 다시 불러오면 handle이 전부 새로
+    // 만들어진다 - 그 다이얼로그가 내장 뷰어(editorViewerPanel_)에서 이전 handle을 계속
+    // 들고 있으면 댕글링되므로 새 모델 목록으로 내장 패널을 다시 만들게 한다.
     if (activeRuleDialog_) {
-        activeRuleDialog_->RewireViewerPanel(viewerPanel_);
+        activeRuleDialog_->RewireModels(BuildLoadedModelList());
     }
 }
 
@@ -221,11 +222,12 @@ void MainWindow::refreshComparisonTable() {
         handlesByInch[entry.inch] = entry.handle; // onImportStepClicked에서 이미 로드된 handle 재사용
     }
 
-    // 내장 규칙(기본 세팅) + 사용자가 추가한 규칙(DB 저장) 순서로 합쳐서 보여준다.
+    // 내장 규칙(기본 세팅) + 사용자가 추가한 규칙(DB 저장)을 합쳐서 보여준다. 같은
+    // 이름이면 사용자 저장본이 내장 기본값을 덮어쓴다(rule::MergeWithBuiltIns 참고 -
+    // "기본값 공차를 수정해서 저장하면 내장값+사용자값 중복으로 뜨면 안 된다"는 요청).
     // "규칙" 헤더 클릭으로 숨긴 항목(hiddenRuleNames_)은 제외한다.
-    auto allRules = rule::BuiltInRules();
     const auto userRules = db_.LoadRulesForProject(projectId_);
-    allRules.insert(allRules.end(), userRules.begin(), userRules.end());
+    auto allRules = rule::MergeWithBuiltIns(userRules);
 
     std::vector<rule::Rule> rules;
     for (auto& r : allRules) {
@@ -234,29 +236,48 @@ void MainWindow::refreshComparisonTable() {
         }
     }
 
+    // § 비교 테이블 컬럼 재구성(2026-09-12) - "규칙/포인트 부위/관리항목 종류/공차/
+    // 인치들 쭉 나열하면 될 것 같다"는 요청. 예전엔 "규칙" 다음 바로 인치 값들이었는데,
+    // 규칙 관리에서 입력한 CTQ 코드(Point 부위)/종류/공차가 화면에서 전혀 안 보였다.
+    // 고정 4칸(규칙/포인트 부위/관리항목 종류/공차) 다음에 인치별 측정값을 그대로 붙인다.
+    constexpr int kFixedColumnCount = 4;
     comparisonTable_->clear();
     comparisonTable_->setRowCount(static_cast<int>(rules.size()));
-    comparisonTable_->setColumnCount(static_cast<int>(handlesByInch.size()) + 1);
+    comparisonTable_->setColumnCount(kFixedColumnCount + static_cast<int>(handlesByInch.size()));
 
     QStringList headers;
-    headers << "규칙 ▾"; // 클릭하면 표시 항목을 고를 수 있다는 힌트
+    headers << "규칙 ▾" << "포인트(부위)" << "관리항목 종류" << "공차"; // 헤더 클릭 힌트는 규칙 칸에만
     for (const auto& [inch, handle] : handlesByInch) {
-        headers << QString("%1\"").arg(inch);
+        headers << ui::FormatInchLabel(inch);
     }
     comparisonTable_->setHorizontalHeaderLabels(headers);
 
     lastReports_.clear();
     for (size_t row = 0; row < rules.size(); ++row) {
         const auto& r = rules[row];
+        const int rowIdx = static_cast<int>(row);
+        comparisonTable_->setItem(rowIdx, 0, new QTableWidgetItem(QString::fromStdString(r.name)));
         comparisonTable_->setItem(
-            static_cast<int>(row), 0, new QTableWidgetItem(QString::fromStdString(r.name)));
+            rowIdx, 1, new QTableWidgetItem(QString::fromStdString(r.ctqCode.value_or(""))));
+        comparisonTable_->setItem(
+            rowIdx, 2, new QTableWidgetItem(QString::fromStdString(r.checkPointCategory.value_or(""))));
+        // § 공차 표시 버그 수정(2026-09-12) - "규칙관리에서 공차 저장했는데 나오지 않아"
+        // 리포트. 전장 사이즈(OverallSize)는 공차값과 무관하게 판정에는 안 쓰지만(인치마다
+        // 값이 다른 게 정상 - RuleEngine.cpp), 사용자가 기록/참고용으로 실제 공차값을
+        // 입력해서 저장한 경우(예: 0.500/0.500)까지 무조건 "-"로 가려버리면 안 된다.
+        // 값을 하나도 안 넣었을 때(둘 다 0)만 "-"로 표시하고, 실제 값이 있으면 보여준다.
+        const bool hasToleranceValue = r.tolerancePlusMm != 0.0 || r.toleranceMinusMm != 0.0;
+        const QString toleranceText = (r.measurementType == rule::MeasurementType::OverallSize && !hasToleranceValue)
+            ? "-"
+            : QString("+%1/-%2").arg(r.tolerancePlusMm, 0, 'f', 3).arg(r.toleranceMinusMm, 0, 'f', 3);
+        comparisonTable_->setItem(rowIdx, 3, new QTableWidgetItem(toleranceText));
 
         std::vector<rule::InchResult> results;
         try {
             results = rule::RuleEngine::Evaluate(*adapter_, handlesByInch, r);
         } catch (const std::exception& e) {
             comparisonTable_->setItem(
-                static_cast<int>(row), 1, new QTableWidgetItem(QString("오류: %1").arg(e.what())));
+                rowIdx, kFixedColumnCount, new QTableWidgetItem(QString("오류: %1").arg(e.what())));
             continue;
         }
 
@@ -264,14 +285,18 @@ void MainWindow::refreshComparisonTable() {
             const auto& result = results[col];
             auto* item = new QTableWidgetItem(QString::number(result.value, 'f', 3));
             item->setBackground(QBrush(result.withinTolerance ? QColor(200, 255, 200) : QColor(255, 200, 200)));
-            comparisonTable_->setItem(static_cast<int>(row), static_cast<int>(col) + 1, item);
+            comparisonTable_->setItem(rowIdx, kFixedColumnCount + static_cast<int>(col), item);
         }
-        lastReports_.push_back(report::RuleReport{r.name, results});
+        lastReports_.push_back(report::RuleReport{r.name, results, r.imagePath, r.ctqCode,
+                                                    r.checkPointCategory, rule::ToString(r.measurementType),
+                                                    r.tolerancePlusMm, r.toleranceMinusMm});
     }
-    // 규칙 이름 칸(0)은 내용 길이에 맞추고, 인치 값 칸들은 서로 비교하기 쉽도록 폭을 통일한다.
-    comparisonTable_->resizeColumnToContents(0);
-    comparisonTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::Interactive);
-    for (int col = 1; col < comparisonTable_->columnCount(); ++col) {
+    // 고정 4칸은 내용 길이에 맞추고, 인치 값 칸들은 서로 비교하기 쉽도록 폭을 통일한다.
+    for (int col = 0; col < kFixedColumnCount; ++col) {
+        comparisonTable_->resizeColumnToContents(col);
+        comparisonTable_->horizontalHeader()->setSectionResizeMode(col, QHeaderView::Interactive);
+    }
+    for (int col = kFixedColumnCount; col < comparisonTable_->columnCount(); ++col) {
         comparisonTable_->horizontalHeader()->setSectionResizeMode(col, QHeaderView::Stretch);
     }
 }
@@ -281,9 +306,8 @@ void MainWindow::onRuleHeaderClicked(int section) {
         return;
     }
 
-    auto allRules = rule::BuiltInRules();
     const auto userRules = db_.LoadRulesForProject(projectId_);
-    allRules.insert(allRules.end(), userRules.begin(), userRules.end());
+    auto allRules = rule::MergeWithBuiltIns(userRules);
 
     QDialog dialog(this);
     dialog.setWindowTitle("표시할 항목 선택");
@@ -327,7 +351,7 @@ void MainWindow::onAddRuleClicked() {
         activeRuleDialog_->activateWindow();
         return;
     }
-    auto* dialog = new RuleEditorDialog(&db_, projectId_, adapter_.get(), viewerPanel_, BuildLoadedModelList(), this);
+    auto* dialog = new RuleEditorDialog(&db_, projectId_, adapter_.get(), BuildLoadedModelList(), this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     activeRuleDialog_ = dialog;
     connect(dialog, &QObject::destroyed, this, [this]() { activeRuleDialog_ = nullptr; });
@@ -422,8 +446,19 @@ void MainWindow::exportComparisonCsv() {
         return;
     }
 
+    // § 모델 컬럼(2026-09-12) - export만 세로형(long)으로 바뀌면서 "모델" 컬럼에 인치별
+    // 실제 로드된 STEP 파일명을 보여줘야 한다(사용자 확인: 화면 매트릭스는 그대로,
+    // export만 세로형). 경로 전체 대신 파일명만 보이게 QFileInfo::fileName() 사용.
+    std::map<int, std::string> modelNameByInch;
+    for (const auto& entry : inchFiles_) {
+        if (entry.inch <= 0) {
+            continue;
+        }
+        modelNameByInch[entry.inch] = QFileInfo(QString::fromStdString(entry.filePath)).fileName().toStdString();
+    }
+
     try {
-        report::ExportComparisonCsv(path.toStdString(), lastReports_);
+        report::ExportComparisonCsv(path.toStdString(), lastReports_, modelNameByInch);
         QMessageBox::information(this, "내보내기 완료",
             "CSV로 저장했습니다:\n" + path +
             "\n\n엑셀 서식이 필요하면 src/python/export_excel.py로 변환하세요.");
