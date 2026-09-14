@@ -31,6 +31,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fstream>
 #include <limits>
 #include <stdexcept>
 #include <unordered_map>
@@ -114,7 +115,37 @@ ModelHandle StepGeometryAdapter::LoadModel(const std::string& filePath) {
     // 뷰어 표시용 테셀레이션을 로드 시점에 미리 계산해 캐시해둔다 (매 프레임 재계산 방지).
     const double diagonal = BoundingDiagonal(model.bounds);
     const double linearDeflection = std::max(diagonal * kLinearDeflectionRatio, 1e-3);
-    BRepMesh_IncrementalMesh(model.shape, linearDeflection, /*isRelative=*/false, kAngularDeflectionRad);
+    BRepMesh_IncrementalMesh meshAlgo(model.shape, linearDeflection, /*isRelative=*/false, kAngularDeflectionRad);
+
+    // § 임시 디버그 로그(2026-09-14) - "STEP은 불러오는데 사각 박스만 보인다"(OCCT 8.1로
+    // 교체한 원격 PC) 리포트 원인 추적용. 면 개수/테셀레이션 성공 여부/삼각형 개수를
+    // 실제로 세서 어디서 비는지 확인한다. 문제 해결되면 이 블록 전체를 제거할 것.
+    {
+        int faceCount = 0;
+        int triangulatedFaceCount = 0;
+        int totalTriangles = 0;
+        for (TopExp_Explorer faceExp(model.shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
+            ++faceCount;
+            const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
+            TopLoc_Location location;
+            const Handle(Poly_Triangulation)& tri = BRep_Tool::Triangulation(face, location);
+            if (!tri.IsNull()) {
+                ++triangulatedFaceCount;
+                totalTriangles += tri->NbTriangles();
+            }
+        }
+        std::ofstream logFile("step_debug.log", std::ios::app);
+        if (logFile.is_open()) {
+            logFile << "[LoadModel] file=" << filePath << "\n"
+                    << "  meshAlgo.IsDone()=" << (meshAlgo.IsDone() ? "true" : "false") << "\n"
+                    << "  linearDeflection=" << linearDeflection << " diagonal=" << diagonal << "\n"
+                    << "  faceCount=" << faceCount << " triangulatedFaceCount=" << triangulatedFaceCount
+                    << " totalTriangles=" << totalTriangles << "\n"
+                    << "  bounds.min=(" << model.bounds.min.x << "," << model.bounds.min.y << ","
+                    << model.bounds.min.z << ") bounds.max=(" << model.bounds.max.x << ","
+                    << model.bounds.max.y << "," << model.bounds.max.z << ")\n";
+        }
+    }
 
     const ModelHandle handle = impl_->nextHandle++;
     impl_->models[handle] = std::move(model);
