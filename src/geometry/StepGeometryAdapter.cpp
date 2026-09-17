@@ -31,8 +31,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -134,16 +137,30 @@ ModelHandle StepGeometryAdapter::LoadModel(const std::string& filePath) {
                 totalTriangles += tri->NbTriangles();
             }
         }
-        std::ofstream logFile("step_debug.log", std::ios::app);
+        std::ostringstream msg;
+        msg << "[LoadModel] file=" << filePath << "\n"
+            << "  meshAlgo.IsDone()=" << (meshAlgo.IsDone() ? "true" : "false") << "\n"
+            << "  linearDeflection=" << linearDeflection << " diagonal=" << diagonal << "\n"
+            << "  faceCount=" << faceCount << " triangulatedFaceCount=" << triangulatedFaceCount
+            << " totalTriangles=" << totalTriangles << "\n"
+            << "  bounds.min=(" << model.bounds.min.x << "," << model.bounds.min.y << ","
+            << model.bounds.min.z << ") bounds.max=(" << model.bounds.max.x << ","
+            << model.bounds.max.y << "," << model.bounds.max.z << ")\n";
+
+        // § CWD(작업 디렉터리) 문제 우회(2026-09-18) - "log가 안 생긴다"는 리포트. 상대
+        // 경로("step_debug.log")는 exe를 어떻게 실행했는지(더블클릭/VS 디버거/바로가기)에
+        // 따라 실제 저장 위치가 달라져서 못 찾았을 가능성이 높다. %TEMP% 절대경로로
+        // 고정하고, 콘솔에서 실행했다면 바로 보이도록 stderr에도 동시에 찍는다.
+        std::cerr << msg.str();
+        const char* tempDir = std::getenv("TEMP");
+        if (!tempDir) {
+            tempDir = std::getenv("TMP");
+        }
+        const std::string logPath =
+            (tempDir ? std::string(tempDir) + "\\" : std::string()) + "step_debug.log";
+        std::ofstream logFile(logPath, std::ios::app);
         if (logFile.is_open()) {
-            logFile << "[LoadModel] file=" << filePath << "\n"
-                    << "  meshAlgo.IsDone()=" << (meshAlgo.IsDone() ? "true" : "false") << "\n"
-                    << "  linearDeflection=" << linearDeflection << " diagonal=" << diagonal << "\n"
-                    << "  faceCount=" << faceCount << " triangulatedFaceCount=" << triangulatedFaceCount
-                    << " totalTriangles=" << totalTriangles << "\n"
-                    << "  bounds.min=(" << model.bounds.min.x << "," << model.bounds.min.y << ","
-                    << model.bounds.min.z << ") bounds.max=(" << model.bounds.max.x << ","
-                    << model.bounds.max.y << "," << model.bounds.max.z << ")\n";
+            logFile << msg.str();
         }
     }
 
