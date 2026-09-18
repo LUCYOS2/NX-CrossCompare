@@ -35,9 +35,11 @@ namespace {
 // 피드백에 따라 큰 폭으로 키웠다. 라이브 뷰어 내장으로 바뀐 뒤에도(§ 헤더 주석 참고)
 // 그대로 editorViewerPanel_의 최소 크기로 쓴다 - 고정 크기가 아니라 "최소 크기 +
 // Expanding 정책"이라 다이얼로그를 더 키우면 뷰어도 같이 커진다.
-constexpr int kImagePreviewWidth = 860;
-constexpr int kImagePreviewHeight = 520;
-constexpr int kLeftColumnWidth = 260;
+// § 이미지/좌측 목록 비중 재확대(2026-09-18) - "전체화면인데 이미지와 하위 입력칸 주변에
+// 여백이 많이 남는다"는 피드백. 다이얼로그 기본 크기와 함께 키운다.
+constexpr int kImagePreviewWidth = 1150;
+constexpr int kImagePreviewHeight = 680;
+constexpr int kLeftColumnWidth = 320;
 } // namespace
 
 RuleEditorDialog::RuleEditorDialog(
@@ -45,7 +47,7 @@ RuleEditorDialog::RuleEditorDialog(
     const std::vector<std::pair<std::string, geometry::ModelHandle>>& models, QWidget* parent)
     : QDialog(parent), db_(db), projectId_(projectId), adapter_(adapter), models_(models) {
     setWindowTitle("규칙 관리");
-    resize(1300, 1150);
+    resize(1650, 1250);
 
     // ---- 좌측: 저장된 규칙 목록 ----
     table_ = new QTableWidget(this);
