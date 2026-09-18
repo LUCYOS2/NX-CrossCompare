@@ -14,20 +14,20 @@
 # 거부, 실제 확인됨) - vcpkg가 업스트림과 다른 자체 설정 파일을 쓰기 때문이다. 그래서
 # 기본값은 예전처럼 COMPONENTS 없이 부르고(vcpkg/로컬 개발 환경 그대로 유지), 공식 OCCT
 # SDK를 쓰는 환경에서만 NX_OCCT_COMPONENTS_ONLY=ON을 켜서 COMPONENTS 방식을 쓰게 한다.
-# 아래 목록은 임의로 추린 게 아니라, VTK 없이 빌드된 vcpkg판 OpenCASCADE로 이미 정상
-# 동작 중인 이 로컬 빌드의 실제 TK*.dll 전체 목록을 그대로 옮긴 것이다(build/Debug/
-# TK*.dll 확인, 2026-09-18) - VTK 브릿지 모듈(TKIVtk/TKIVtkDraw 등)은 여기 없다.
+#
+# COMPONENTS 이름은 TK*(개별 라이브러리) 단위가 아니라 모듈(그룹) 단위다 - 원격 PC가
+# 공식 SDK의 OpenCASCADEConfig.cmake에서 직접 확인한 유효 값은 FoundationClasses,
+# ModelingData, ModelingAlgorithms, Visualization, ApplicationFramework, DataExchange,
+# Draw 7개뿐이다(2026-09-18 확인). 우리는 STEP 파싱/B-rep 분석/테셀레이션만 필요하고
+# 자체 렌더링은 Qt/OpenGL로 직접 하므로 VTK를 끌어오는 Visualization/Draw는 빼고,
+# FoundationClasses(TKernel/TKMath 등) + ModelingData(TKBRep/TKG3d 등) +
+# ModelingAlgorithms(TKTopAlgo/TKBool/TKMesh 등) + DataExchange(TKDESTEP 등)만 쓴다.
 option(NX_OCCT_COMPONENTS_ONLY
     "공식 OpenCASCADE SDK(예: VTK 지원 포함 빌드)에서 Visualization/Draw(VTK) 타겟을 \
 피하려면 ON - vcpkg 환경에서는 OFF(기본값) 유지" OFF)
 if(NX_OCCT_COMPONENTS_ONLY)
     find_package(OpenCASCADE CONFIG REQUIRED COMPONENTS
-        TKBO TKBRep TKBin TKBinL TKBinTObj TKBinXCAF TKBool TKCAF TKCDF TKDE TKDECascade
-        TKDEIGES TKDEOBJ TKDEPLY TKDESTEP TKDESTL TKDEVRML TKExpress TKFeat TKFillet
-        TKG2d TKG3d TKGeomAlgo TKGeomBase TKHLR TKHelix TKLCAF TKMath TKMesh TKMeshVS
-        TKOffset TKOpenGl TKPrim TKRWMesh TKService TKShHealing TKStd TKStdL TKTObj
-        TKTopAlgo TKV3d TKVCAF TKXCAF TKXMesh TKXSBase TKXml TKXmlL TKXmlTObj TKXmlXCAF
-        TKernel
+        FoundationClasses ModelingData ModelingAlgorithms DataExchange
     )
 else()
     find_package(OpenCASCADE CONFIG REQUIRED)
