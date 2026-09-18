@@ -8,40 +8,40 @@
 # 됨). COMPONENTS 없이 find_package를 부르면 OCCT 설정 파일이 Visualization/Draw 타겟
 # 파일(VTK::* 임포트 타겟 참조)까지 전부 include해버려서 VTK가 없으면 실패한다.
 #
-# 해결(옵션으로 분리): 우리가 실제로 쓰는 모듈만 COMPONENTS로 명시하면 Visualization/
-# Draw 타겟 파일 자체를 안 건드리게 되는데, 이 COMPONENTS 지정 방식을 vcpkg판
-# OpenCASCADEConfig.cmake(이 로컬 PC가 씀)가 지원 안 해서("unsupported component" 전부
-# 거부, 실제 확인됨) - vcpkg가 업스트림과 다른 자체 설정 파일을 쓰기 때문이다. 그래서
-# 기본값은 예전처럼 COMPONENTS 없이 부르고(vcpkg/로컬 개발 환경 그대로 유지), 공식 OCCT
-# SDK를 쓰는 환경에서만 NX_OCCT_COMPONENTS_ONLY=ON을 켜서 COMPONENTS 방식을 쓰게 한다.
+# COMPONENTS 시도는 포기함(2026-09-18) - find_package(... COMPONENTS Visualization
+# ModelingData ModelingAlgorithms ...)로 순서를 바꿔가며 여러 번 시도했지만, 이 SDK의
+# ModelingAlgorithms 타겟 파일은 Visualization(TKService/TKV3d)이 먼저 정의돼 있어야
+# 하고, 반대로 Visualization 타겟 파일은 ModelingData/ModelingAlgorithms(TKBRep,
+# TKTopAlgo, TKMesh 등)이 먼저 정의돼 있어야 해서, 어느 순서로 나열해도 실패하는
+# 순환 의존이 있다(원격 PC가 양쪽 순서 다 실제로 확인). 즉 이 SDK에서는 COMPONENTS로
+# Visualization/Draw(및 그게 끌어오는 VTK)만 쏙 빼는 게 애초에 불가능하다.
 #
-# COMPONENTS 이름은 TK*(개별 라이브러리) 단위가 아니라 모듈(그룹) 단위다 - 원격 PC가
-# 공식 SDK의 OpenCASCADEConfig.cmake에서 직접 확인한 유효 값은 FoundationClasses,
-# ModelingData, ModelingAlgorithms, Visualization, ApplicationFramework, DataExchange,
-# Draw 7개뿐이다(2026-09-18 확인). 우리는 STEP 파싱/B-rep 분석/테셀레이션만 필요하고
-# 자체 렌더링은 Qt/OpenGL로 직접 하므로 VTK를 끌어오는 Draw는 뺐는데, DataExchange
-# 단독으로는 STEPCAFControl(XCAF 기반 STEP 리더)이 요구하는 TKCAF/TKCDF/TKLCAF/TKVCAF/
-# TKBin*/TKStd*/TKXml*(-> ApplicationFramework 모듈) 및 TKService/TKV3d
-# (-> Visualization 모듈) 타겟이 정의되지 않아 configure가 또 실패했다(원격 PC 확인,
-# 2026-09-18). 그래서 ApplicationFramework/Visualization도 추가한다 - Visualization을
-# 넣으면 애초에 피하려던 VTK 참조가 되살아날 수도 있는데, 그건 실제로 콘피규어해봐야
-# 확인 가능하다(로컬 vcpkg 환경에서는 이 COMPONENTS 방식 자체가 지원되지 않아 재현/
-# 검증 불가 - 원격 PC에서 직접 시도해서 결과를 알려줘야 다음 단계를 정할 수 있다).
-#
-# 순서 중요: OCCT의 find_package COMPONENTS 처리는 나열된 순서대로 각 모듈의 타겟
-# 파일을 include하면서 그 자리에서 의존 타겟이 이미 정의돼 있는지 확인하는 것으로
-# 보인다 - ModelingAlgorithms가 Visualization(TKService/TKV3d)에 의존하는데
-# Visualization을 뒤에 적으면 아직 정의 안 된 타겟을 참조해서 실패한다(원격 PC 확인,
-# 2026-09-18). 그래서 의존 대상을 먼저 적는 순서로 나열한다: FoundationClasses ->
-# Visualization -> ModelingData -> ModelingAlgorithms -> ApplicationFramework ->
-# DataExchange.
-option(NX_OCCT_COMPONENTS_ONLY
-    "공식 OpenCASCADE SDK(예: VTK 지원 포함 빌드)에서 Draw(VTK) 타겟을 \
-피하려면 ON - vcpkg 환경에서는 OFF(기본값) 유지" OFF)
-if(NX_OCCT_COMPONENTS_ONLY)
-    find_package(OpenCASCADE CONFIG REQUIRED COMPONENTS
-        FoundationClasses Visualization ModelingData ModelingAlgorithms
-        ApplicationFramework DataExchange
+# 대신 NX_OCCT_DIRECT_LINK=ON이면 find_package(CONFIG)의 임포트 타겟 그래프를 아예
+# 타지 않고, 우리가 실제로 쓰는 TK*.lib들만 이름으로 직접 target_link_libraries한다.
+# .lib 자체는 VTK 심볼을 참조하지 않으므로(OCCT의 VTK 연동은 별도 브릿지 라이브러리인
+# TKIVtk/TKIVtkDraw에만 있고 TKV3d/TKService 본체에는 없음) 이렇게 하면 VTK 없이도
+# 링크된다 - Visualization/Draw 타겟 파일(및 그 안의 VTK::* 참조) 자체를 CMake가
+# 아예 읽지 않기 때문. 사용하려면 OpenCASCADE_INCLUDE_DIR와 OpenCASCADE_LIBRARY_DIR를
+# 반드시 -D로 지정해야 한다(공식 SDK 폴더 구조 기준 보통 <SDK>/inc, <SDK>/win64/vc14/lib
+# 형태 - 실제 폴더명은 SDK 압축을 풀어서 확인).
+option(NX_OCCT_DIRECT_LINK
+    "공식 OpenCASCADE SDK에서 find_package(CONFIG)의 Visualization<->ModelingAlgorithms \
+순환 의존(VTK 요구)을 피하려면 ON - OpenCASCADE_INCLUDE_DIR/OpenCASCADE_LIBRARY_DIR를 \
+반드시 같이 지정해야 함. vcpkg 환경에서는 OFF(기본값) 유지" OFF)
+if(NX_OCCT_DIRECT_LINK)
+    if(NOT OpenCASCADE_INCLUDE_DIR OR NOT OpenCASCADE_LIBRARY_DIR)
+        message(FATAL_ERROR
+            "NX_OCCT_DIRECT_LINK=ON이면 -DOpenCASCADE_INCLUDE_DIR=<SDK>/inc 와 "
+            "-DOpenCASCADE_LIBRARY_DIR=<SDK>/win64/vc14/lib (SDK 실제 폴더 구조에 맞게) "
+            "를 함께 지정해야 한다.")
+    endif()
+    set(OpenCASCADE_LIBRARIES
+        TKernel TKMath
+        TKG2d TKG3d TKGeomBase TKGeomAlgo TKBRep TKTopAlgo TKMesh TKShHealing TKHLR
+        TKBool TKBO TKPrim TKFillet TKOffset TKFeat
+        TKService TKV3d
+        TKCDF TKLCAF TKCAF TKVCAF TKBinL TKBin TKBinTObj TKStdL TKStd TKXmlL TKXml TKXmlTObj TKXCAF
+        TKXSBase TKDE TKDECascade TKDESTEP TKDEIGES TKDESTL TKDEOBJ TKDEPLY TKDEVRML
     )
 else()
     find_package(OpenCASCADE CONFIG REQUIRED)
@@ -63,6 +63,9 @@ target_include_directories(geometry PUBLIC ${CMAKE_SOURCE_DIR}/src)
 # PRIVATE: StepGeometryAdapter는 pImpl로 OCCT 타입을 감춰서 헤더에 노출하지 않으므로,
 # OCCT include 경로는 geometry 라이브러리 내부(StepGeometryAdapter.cpp)에서만 필요하다.
 target_include_directories(geometry PRIVATE ${OpenCASCADE_INCLUDE_DIR})
+if(NX_OCCT_DIRECT_LINK)
+    target_link_directories(geometry PRIVATE ${OpenCASCADE_LIBRARY_DIR})
+endif()
 target_link_libraries(geometry PRIVATE ${OpenCASCADE_LIBRARIES})
 
 if(NX_OPEN_AVAILABLE)
