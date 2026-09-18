@@ -27,13 +27,21 @@
 # 넣으면 애초에 피하려던 VTK 참조가 되살아날 수도 있는데, 그건 실제로 콘피규어해봐야
 # 확인 가능하다(로컬 vcpkg 환경에서는 이 COMPONENTS 방식 자체가 지원되지 않아 재현/
 # 검증 불가 - 원격 PC에서 직접 시도해서 결과를 알려줘야 다음 단계를 정할 수 있다).
+#
+# 순서 중요: OCCT의 find_package COMPONENTS 처리는 나열된 순서대로 각 모듈의 타겟
+# 파일을 include하면서 그 자리에서 의존 타겟이 이미 정의돼 있는지 확인하는 것으로
+# 보인다 - ModelingAlgorithms가 Visualization(TKService/TKV3d)에 의존하는데
+# Visualization을 뒤에 적으면 아직 정의 안 된 타겟을 참조해서 실패한다(원격 PC 확인,
+# 2026-09-18). 그래서 의존 대상을 먼저 적는 순서로 나열한다: FoundationClasses ->
+# Visualization -> ModelingData -> ModelingAlgorithms -> ApplicationFramework ->
+# DataExchange.
 option(NX_OCCT_COMPONENTS_ONLY
     "공식 OpenCASCADE SDK(예: VTK 지원 포함 빌드)에서 Draw(VTK) 타겟을 \
 피하려면 ON - vcpkg 환경에서는 OFF(기본값) 유지" OFF)
 if(NX_OCCT_COMPONENTS_ONLY)
     find_package(OpenCASCADE CONFIG REQUIRED COMPONENTS
-        FoundationClasses ModelingData ModelingAlgorithms
-        ApplicationFramework DataExchange Visualization
+        FoundationClasses Visualization ModelingData ModelingAlgorithms
+        ApplicationFramework DataExchange
     )
 else()
     find_package(OpenCASCADE CONFIG REQUIRED)
