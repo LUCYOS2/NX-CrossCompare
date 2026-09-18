@@ -135,6 +135,20 @@ std::optional<geometry::AnchorCandidate> SelectRightmost(
     return best;
 }
 
+std::optional<geometry::AnchorCandidate> SelectBestPatchMatch(
+    const std::vector<geometry::AnchorCandidate>& candidates) {
+    if (candidates.empty()) {
+        return std::nullopt;
+    }
+    auto best = candidates.front();
+    for (const auto& c : candidates) {
+        if (c.patchSimilarity > best.patchSimilarity) {
+            best = c;
+        }
+    }
+    return best;
+}
+
 std::optional<std::pair<geometry::FaceCandidate, geometry::FaceCandidate>> SelectNearestFacePair(
     const std::vector<geometry::FaceCandidate>& candidatesA,
     const std::vector<geometry::FaceCandidate>& candidatesB) {

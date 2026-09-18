@@ -7,6 +7,7 @@
 #include <QCheckBox>
 #include <QDebug>
 #include <QDoubleSpinBox>
+#include <QFont>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -252,6 +253,16 @@ QWidget* MultiViewportPanel::buildSectionControlBar() {
     sectionValueSpin_->setSuffix(" mm");
     sectionValueSpin_->setRange(-1e6, 1e6);
     layout->addWidget(sectionValueSpin_);
+
+    // § 조작 안내 문구(2026-09-18) - "가운데 클릭으로 단면 위치를 지정한다"는 게 발견하기
+    // 어렵다는 피드백 - 작은 회색 라벨로 상시 노출.
+    auto* sectionHintLabel = new QLabel("휠 버튼(가운데) 클릭 = 도면에서 단면 위치 지정", bar);
+    QFont hintFont = sectionHintLabel->font();
+    hintFont.setPointSizeF(hintFont.pointSizeF() * 0.85);
+    sectionHintLabel->setFont(hintFont);
+    sectionHintLabel->setStyleSheet("color: gray;");
+    layout->addSpacing(12);
+    layout->addWidget(sectionHintLabel);
 
     connect(sectionEnableCheck_, &QCheckBox::toggled, this, [this](bool checked) {
         if (syncingSectionControls_) {

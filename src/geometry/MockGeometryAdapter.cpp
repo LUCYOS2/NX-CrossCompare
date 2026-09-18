@@ -37,15 +37,18 @@ std::vector<AnchorCandidate> GenerateAnchorCandidates(double scale, double halfD
     std::vector<AnchorCandidate> candidates;
 
     // 001. Boss-Screw: Hole(Bezel) 3개 후보, 그중 H0에 대응하는 Boss_Center 1개만
-    // 고정 오프셋(0.05, 0.02)으로 근접 배치, 나머지는 스케일된 먼 거리 오답.
+    // 고정 오프셋(0.05, 0.02)으로 근접 배치, 나머지는 스케일된 먼 거리 오답. 지름은
+    // MakeBossScrewRule의 paramValue(Hole=2.8, Boss_Center=2.6)와 일치시켜서 diameter
+    // 필터를 통과시킨다 - 이 테스트가 검증하려는 건 nearest_pair의 "거리" 판별력이지
+    // 지름 필터가 아니라서, 오답도 지름은 정답과 같게(거리로만 걸러지게) 둔다.
     const double h0x = -150.0 * scale, h0y = 100.0 * scale;
-    candidates.push_back({"Hole", "Bezel", {h0x, h0y, halfD}});
-    candidates.push_back({"Hole", "Bezel", {0.0 * scale, 100.0 * scale, halfD}});
-    candidates.push_back({"Hole", "Bezel", {180.0 * scale, 100.0 * scale, halfD}});
+    candidates.push_back({"Hole", "Bezel", {h0x, h0y, halfD}, 2.8});
+    candidates.push_back({"Hole", "Bezel", {0.0 * scale, 100.0 * scale, halfD}, 2.8});
+    candidates.push_back({"Hole", "Bezel", {180.0 * scale, 100.0 * scale, halfD}, 2.8});
 
-    candidates.push_back({"Boss_Center", "Rear_Chassis", {h0x + 0.05, h0y + 0.02, halfD}});
-    candidates.push_back({"Boss_Center", "Rear_Chassis", {250.0 * scale, -50.0 * scale, halfD}});
-    candidates.push_back({"Boss_Center", "Rear_Chassis", {-300.0 * scale, 80.0 * scale, halfD}});
+    candidates.push_back({"Boss_Center", "Rear_Chassis", {h0x + 0.05, h0y + 0.02, halfD}, 2.6});
+    candidates.push_back({"Boss_Center", "Rear_Chassis", {250.0 * scale, -50.0 * scale, halfD}, 2.6});
+    candidates.push_back({"Boss_Center", "Rear_Chassis", {-300.0 * scale, 80.0 * scale, halfD}, 2.6});
 
     // 002. 후크 높이: Hook_Tip_Edge(Side_Frame) 3개 후보, leftmost(가장 작은 x)가 정답.
     // Z는 인치 무관 고정(-halfD + 8.5) — 두께가 이미 고정이므로 높이도 자동으로 고정된다.

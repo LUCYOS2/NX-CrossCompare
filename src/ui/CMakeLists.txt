@@ -7,6 +7,8 @@ add_library(ui STATIC
     ImportInchDialog.cpp
     AnchorSearchDialog.h
     AnchorSearchDialog.cpp
+    ShapePresetDialog.h
+    ShapePresetDialog.cpp
 )
 
 target_link_libraries(ui PUBLIC Qt6::Widgets viewer rule export_lib database)

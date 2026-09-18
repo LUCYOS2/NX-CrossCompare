@@ -48,6 +48,14 @@ std::optional<geometry::AnchorCandidate> SelectLeftmost(
 std::optional<geometry::AnchorCandidate> SelectRightmost(
     const std::vector<geometry::AnchorCandidate>& candidates);
 
+// § 형상 프리셋(2026-09-18) - patchSimilarity가 가장 높은 후보를 자동 선택한다. 프리셋
+// 기반 검색(Hook/Flange류)은 이름/부품 정보 없이 생김새만으로 판단하는 반자동 매칭이라
+// 100% 확신을 못 하는데, 그렇다고 매 인치마다 사람이 확인하면 자동화 취지가 무색해진다
+// (계획서 "형상 프리셋" §UI/워크플로우 참고) - 그래서 등록 시점에만 사람이 확인하고,
+// 이후 인치별 적용은 이 Selector가 자동으로 최종 후보를 확정한다.
+std::optional<geometry::AnchorCandidate> SelectBestPatchMatch(
+    const std::vector<geometry::AnchorCandidate>& candidates);
+
 // 가장 가까운 면 쌍 (거리만 기준, 법선 방향은 보지 않음).
 std::optional<std::pair<geometry::FaceCandidate, geometry::FaceCandidate>> SelectNearestFacePair(
     const std::vector<geometry::FaceCandidate>& candidatesA,

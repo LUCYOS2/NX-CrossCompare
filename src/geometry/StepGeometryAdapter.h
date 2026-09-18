@@ -49,6 +49,13 @@ public:
     // 재사용하므로, 여기서 나온 결과를 anchor_type/지름으로 그대로 옮겨써도 일관된다.
     PickResult PickFace(ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const override;
 
+    // § 형상 프리셋(2026-09-18) - IGeometryAdapter.h 주석 참고. clickPoint에 가장 가까운
+    // 면(OCCT BRepExtrema_DistShapeShape)을 시드로 FeaturePatch.h의 패치 확장/지문 계산을
+    // 실행한다.
+    FeaturePatchCapture CaptureFeaturePatch(ModelHandle handle, const Vec3& clickPoint) const override;
+    std::vector<PatchCandidate> FindPatchCandidates(
+        ModelHandle handle, const FeaturePatchDescriptor& descriptor, double similarityThreshold) const override;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

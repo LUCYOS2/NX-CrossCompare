@@ -1,8 +1,22 @@
+// § 유니코드 경로 지원 - windows.h를 파일 맨 앞에서 먼저 통째로 포함시킨다. OCCT의
+// Standard_Macro.hxx가 WIN32_LEAN_AND_MEAN을 정의한 뒤 windows.h를 포함해서, OCCT
+// 헤더들보다 뒤에 windows.h를 include하면(#pragma once 가드 때문에) stringapiset.h가
+// 필요로 하는 winnls.h 선언들이 빠진 채로 남는다 - 먼저 완전한 windows.h를 넣어서 이
+// 문제를 피한다.
+#ifdef _WIN32
+#include <windows.h>
+#include <stringapiset.h>
+#endif
+
 #include "geometry/StepGeometryAdapter.h"
+
+#include "geometry/FeaturePatch.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
@@ -20,6 +34,7 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
@@ -31,11 +46,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <fstream>
-#include <iostream>
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <utility>
@@ -76,6 +88,51 @@ double BoundingDiagonal(const BoundingBox& box) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+// § 형상 프리셋 - CaptureFeaturePatch의 clickPoint(월드 좌표)에서 가장 가까운 면을 찾는다.
+// 클릭 지점은 이미 뷰어 피킹(PickFace)으로 형상 표면 위에서 얻은 점이라 실제로는 거리가
+// 0에 매우 가깝다 - 전체 면을 순회하는 O(n) 비용은 클릭 1회당 일회성이라 허용.
+bool FindNearestFace(const TopoDS_Shape& shape, const gp_Pnt& point, TopoDS_Face& outFace) {
+    const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
+    double bestDist = std::numeric_limits<double>::max();
+    bool found = false;
+    for (TopExp_Explorer faceExp(shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
+        const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
+        BRepExtrema_DistShapeShape extrema(vertex, face);
+        if (!extrema.IsDone() || extrema.NbSolution() == 0) {
+            continue;
+        }
+        const double dist = extrema.Value();
+        if (dist < bestDist) {
+            bestDist = dist;
+            outFace = face;
+            found = true;
+        }
+    }
+    return found;
+}
+
+#ifdef _WIN32
+// § 유니코드 경로 지원(2026-09-18) - "●" 같은 특수문자가 든 경로에서 STEP 로드가
+// 실패한다는 리포트. STEPControl_Reader::ReadFile(const char*)는 OS의 narrow 문자열
+// API(현재 ANSI 코드페이지 기준)를 타는데, filePath는 Qt QString::toStdString()이 만든
+// UTF-8이라 시스템 코드페이지에 없는 문자(●는 물론 실사용에서 흔한 한글 경로도 포함될
+// 가능성)가 있으면 깨진다. UTF-8 -> UTF-16으로 직접 바꿔서 std::ifstream을 열면
+// 코드페이지와 무관하게 항상 정확한 파일을 찾는다(MSVC STL의 wchar_t* ifstream 생성자
+// 확장 기능 사용 - 이 프로젝트는 MSVC 전용이라 안전).
+std::wstring Utf8ToWide(const std::string& utf8) {
+    if (utf8.empty()) {
+        return std::wstring();
+    }
+    const int wideLen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wideLen <= 0) {
+        return std::wstring();
+    }
+    std::wstring wide(static_cast<size_t>(wideLen - 1), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, wide.data(), wideLen);
+    return wide;
+}
+#endif
+
 } // namespace
 
 struct StepGeometryAdapter::Impl {
@@ -99,7 +156,17 @@ StepGeometryAdapter::~StepGeometryAdapter() = default;
 
 ModelHandle StepGeometryAdapter::LoadModel(const std::string& filePath) {
     STEPControl_Reader reader;
+#ifdef _WIN32
+    // 유니코드 경로 지원 - 위 Utf8ToWide() 주석 참고. ReadStream의 첫 인자(theName)는
+    // 진단 로그용 라벨일 뿐이라 실제 경로일 필요는 없다.
+    std::ifstream fileStream(Utf8ToWide(filePath), std::ios::binary);
+    if (!fileStream.is_open()) {
+        throw std::runtime_error("StepGeometryAdapter::LoadModel - STEP 파일을 열 수 없습니다: " + filePath);
+    }
+    const IFSelect_ReturnStatus status = reader.ReadStream("step_input", fileStream);
+#else
     const IFSelect_ReturnStatus status = reader.ReadFile(filePath.c_str());
+#endif
     if (status != IFSelect_RetDone) {
         throw std::runtime_error("StepGeometryAdapter::LoadModel - STEP 파일을 읽을 수 없습니다: " + filePath);
     }
@@ -119,50 +186,7 @@ ModelHandle StepGeometryAdapter::LoadModel(const std::string& filePath) {
     const double diagonal = BoundingDiagonal(model.bounds);
     const double linearDeflection = std::max(diagonal * kLinearDeflectionRatio, 1e-3);
     BRepMesh_IncrementalMesh meshAlgo(model.shape, linearDeflection, /*isRelative=*/false, kAngularDeflectionRad);
-
-    // § 임시 디버그 로그(2026-09-14) - "STEP은 불러오는데 사각 박스만 보인다"(OCCT 8.1로
-    // 교체한 원격 PC) 리포트 원인 추적용. 면 개수/테셀레이션 성공 여부/삼각형 개수를
-    // 실제로 세서 어디서 비는지 확인한다. 문제 해결되면 이 블록 전체를 제거할 것.
-    {
-        int faceCount = 0;
-        int triangulatedFaceCount = 0;
-        int totalTriangles = 0;
-        for (TopExp_Explorer faceExp(model.shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
-            ++faceCount;
-            const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
-            TopLoc_Location location;
-            const Handle(Poly_Triangulation)& tri = BRep_Tool::Triangulation(face, location);
-            if (!tri.IsNull()) {
-                ++triangulatedFaceCount;
-                totalTriangles += tri->NbTriangles();
-            }
-        }
-        std::ostringstream msg;
-        msg << "[LoadModel] file=" << filePath << "\n"
-            << "  meshAlgo.IsDone()=" << (meshAlgo.IsDone() ? "true" : "false") << "\n"
-            << "  linearDeflection=" << linearDeflection << " diagonal=" << diagonal << "\n"
-            << "  faceCount=" << faceCount << " triangulatedFaceCount=" << triangulatedFaceCount
-            << " totalTriangles=" << totalTriangles << "\n"
-            << "  bounds.min=(" << model.bounds.min.x << "," << model.bounds.min.y << ","
-            << model.bounds.min.z << ") bounds.max=(" << model.bounds.max.x << ","
-            << model.bounds.max.y << "," << model.bounds.max.z << ")\n";
-
-        // § CWD(작업 디렉터리) 문제 우회(2026-09-18) - "log가 안 생긴다"는 리포트. 상대
-        // 경로("step_debug.log")는 exe를 어떻게 실행했는지(더블클릭/VS 디버거/바로가기)에
-        // 따라 실제 저장 위치가 달라져서 못 찾았을 가능성이 높다. %TEMP% 절대경로로
-        // 고정하고, 콘솔에서 실행했다면 바로 보이도록 stderr에도 동시에 찍는다.
-        std::cerr << msg.str();
-        const char* tempDir = std::getenv("TEMP");
-        if (!tempDir) {
-            tempDir = std::getenv("TMP");
-        }
-        const std::string logPath =
-            (tempDir ? std::string(tempDir) + "\\" : std::string()) + "step_debug.log";
-        std::ofstream logFile(logPath, std::ios::app);
-        if (logFile.is_open()) {
-            logFile << msg.str();
-        }
-    }
+    (void)meshAlgo;
 
     const ModelHandle handle = impl_->nextHandle++;
     impl_->models[handle] = std::move(model);
@@ -570,6 +594,48 @@ std::vector<FaceCandidate> StepGeometryAdapter::FindFaceCandidates(
         candidates.push_back(FaceCandidate{faceType, partName, center, normal});
     }
     return candidates;
+}
+
+FeaturePatchCapture StepGeometryAdapter::CaptureFeaturePatch(ModelHandle handle, const Vec3& clickPoint) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return FeaturePatchCapture{};
+    }
+
+    TopoDS_Face seedFace;
+    if (!FindNearestFace(model->shape, gp_Pnt(clickPoint.x, clickPoint.y, clickPoint.z), seedFace)) {
+        return FeaturePatchCapture{};
+    }
+
+    const double maxRadius = BoundingDiagonal(model->bounds) * kPatchRadiusRatio;
+    const std::vector<TopoDS_Face> patch = ExtractFeaturePatch(model->shape, seedFace, maxRadius);
+    if (patch.empty()) {
+        return FeaturePatchCapture{};
+    }
+
+    FeaturePatchCapture capture;
+    capture.descriptor = ComputePatchDescriptor(patch);
+    capture.position = PatchCentroid(patch);
+    capture.valid = true;
+    return capture;
+}
+
+std::vector<PatchCandidate> StepGeometryAdapter::FindPatchCandidates(
+    ModelHandle handle, const FeaturePatchDescriptor& descriptor, double similarityThreshold) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return {};
+    }
+
+    const std::vector<FeaturePatchCandidate> rawCandidates =
+        geometry::FindPatchCandidates(model->shape, descriptor, /*excludeFaces=*/{}, similarityThreshold);
+
+    std::vector<PatchCandidate> result;
+    result.reserve(rawCandidates.size());
+    for (const auto& candidate : rawCandidates) {
+        result.push_back(PatchCandidate{candidate.position, candidate.similarity});
+    }
+    return result;
 }
 
 } // namespace geometry

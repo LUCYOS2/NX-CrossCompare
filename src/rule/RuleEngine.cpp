@@ -33,8 +33,45 @@ std::vector<geometry::AnchorCandidate> ApplyAnchorFilters(
     return candidates;
 }
 
+// § 형상 프리셋(2026-09-18) - anchor.patchDescriptor가 있으면 FindAnchorCandidates 대신
+// adapter.FindPatchCandidates로 지문 유사도 검색을 하고, 결과(PatchCandidate)를
+// AnchorCandidate로 옮겨 담는다(patchSimilarity 필드에 유사도를 실어서 - 이후
+// ResolveSingleAnchor/ResolvePairAnchors가 이 값으로 자동 선택). 일반 anchorType(Hole 등)
+// 이면 기존 경로 그대로. 임계값(geometry::kPatchSimilarityThreshold)은 UI 쪽 프리셋
+// 등록/검색 미리보기와 공유한다(IGeometryAdapter.h 참고).
+std::vector<geometry::AnchorCandidate> ResolveAnchorCandidates(
+    const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, const Anchor& anchor) {
+    if (anchor.patchDescriptor.has_value()) {
+        const auto patchCandidates =
+            adapter.FindPatchCandidates(handle, *anchor.patchDescriptor, geometry::kPatchSimilarityThreshold);
+        std::vector<geometry::AnchorCandidate> candidates;
+        candidates.reserve(patchCandidates.size());
+        for (const auto& pc : patchCandidates) {
+            geometry::AnchorCandidate candidate;
+            candidate.anchorType = anchor.anchorType;
+            candidate.partName = anchor.partName;
+            candidate.position = pc.position;
+            candidate.patchSimilarity = pc.similarity;
+            candidates.push_back(std::move(candidate));
+        }
+        return candidates;
+    }
+    return adapter.FindAnchorCandidates(handle, anchor.anchorType, anchor.partName);
+}
+
+// 후보 중 하나라도 patchSimilarity>0이면 프리셋 기반 검색 결과다(일반 FindAnchorCandidates
+// 경로는 이 필드를 항상 기본값 0으로 둔다) - 그 경우 selector 설정과 무관하게 항상
+// 유사도 최고점을 자동 채택한다(§ 형상 프리셋, 계획서 UI/워크플로우 3번 참고).
+bool IsPatchBased(const std::vector<geometry::AnchorCandidate>& candidates) {
+    return std::any_of(candidates.begin(), candidates.end(),
+                        [](const geometry::AnchorCandidate& c) { return c.patchSimilarity > 0.0; });
+}
+
 std::optional<geometry::AnchorCandidate> ResolveSingleAnchor(
     const std::vector<geometry::AnchorCandidate>& candidates, const std::vector<std::string>& selectors) {
+    if (IsPatchBased(candidates)) {
+        return SelectBestPatchMatch(candidates);
+    }
     if (std::find(selectors.begin(), selectors.end(), "leftmost") != selectors.end()) {
         return SelectLeftmost(candidates);
     }
@@ -51,6 +88,18 @@ std::optional<std::pair<geometry::AnchorCandidate, geometry::AnchorCandidate>> R
     const std::vector<geometry::AnchorCandidate>& candidatesA,
     const std::vector<geometry::AnchorCandidate>& candidatesB,
     const std::vector<std::string>& selectors) {
+    // § 형상 프리셋 - A/B 어느 한쪽이라도 프리셋 기반이면, 그 쪽만 유사도 최고점으로 먼저
+    // 좁히고(다른 쪽이 프리셋이 아니면 기존 로직으로 별도 해석) 조합한다. nearest_pair처럼
+    // "두 후보 집합 사이 최적 조합"을 찾는 방식과는 다르다 - 프리셋은 이미 자체적으로
+    // 후보를 1개로 확정하는 게 우선이라서다.
+    if (IsPatchBased(candidatesA) || IsPatchBased(candidatesB)) {
+        const auto a = ResolveSingleAnchor(candidatesA, selectors);
+        const auto b = ResolveSingleAnchor(candidatesB, selectors);
+        if (!a || !b) {
+            return std::nullopt;
+        }
+        return std::make_pair(*a, *b);
+    }
     if (std::find(selectors.begin(), selectors.end(), "nearest_pair") != selectors.end()) {
         return SelectNearestPair(candidatesA, candidatesB);
     }
@@ -84,10 +133,8 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.anchors.size() != 2) {
                 throw std::runtime_error(rule.name + ": point_to_point/axis_projection needs 2 anchors");
             }
-            auto candidatesA = adapter.FindAnchorCandidates(
-                handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
-            auto candidatesB = adapter.FindAnchorCandidates(
-                handle, rule.anchors[1].anchorType, rule.anchors[1].partName);
+            auto candidatesA = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
+            auto candidatesB = ResolveAnchorCandidates(adapter, handle, rule.anchors[1]);
             candidatesA = ApplyAnchorFilters(std::move(candidatesA), rule.anchors[0]);
             candidatesB = ApplyAnchorFilters(std::move(candidatesB), rule.anchors[1]);
             const auto pair = ResolvePairAnchors(candidatesA, candidatesB, rule.selector);
@@ -102,8 +149,7 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.anchors.size() != 1 || !rule.referencePlane.has_value()) {
                 throw std::runtime_error(rule.name + ": point_to_plane needs 1 anchor + referencePlane");
             }
-            auto candidates = adapter.FindAnchorCandidates(
-                handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
+            auto candidates = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
             candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
             const auto resolved = ResolveSingleAnchor(candidates, rule.selector);
             if (!resolved) {
@@ -142,8 +188,7 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.anchors.size() != 1) {
                 throw std::runtime_error(rule.name + ": instance_count needs 1 anchor");
             }
-            auto candidates = adapter.FindAnchorCandidates(
-                handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
+            auto candidates = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
             candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
             return static_cast<double>(candidates.size());
         }
@@ -151,8 +196,7 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.anchors.size() != 1) {
                 throw std::runtime_error(rule.name + ": min_pitch needs 1 anchor");
             }
-            auto candidates = adapter.FindAnchorCandidates(
-                handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
+            auto candidates = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
             candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
             if (candidates.size() < 2) {
                 throw std::runtime_error(

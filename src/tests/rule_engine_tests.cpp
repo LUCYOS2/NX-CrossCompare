@@ -237,14 +237,34 @@ void TestParallelFacePairRejectsNonAntiParallelCandidates() {
 } // namespace
 
 int main() {
-    TestNearestPairPicksTrueMatchAmongDistractors();
-    TestBossScrewRuleAcrossInches();
-    TestHookHeightRuleAcrossInches();
-    TestHookCatchRuleAcrossInches();
-    TestRibOpenCellGapRuleAcrossInches();
-    TestWallThicknessRuleAcrossInches();
-    TestOverallSizeRulesScaleWithInchExceptDepth();
-    TestParallelFacePairRejectsNonAntiParallelCandidates();
+    // § 예외 = 조용한 무한 행(2026-09-18) - 이 환경에서는 테스트 함수가 던진 예외를 못
+    // 잡으면(std::terminate) 콘솔에 아무 메시지도 없이 프로세스가 멈춰버린다(Windows
+    // 오류 보고 다이얼로그가 헤드리스 쉘에서 응답을 못 받는 것으로 추정) - 실제로
+    // MockGeometryAdapter의 Boss-Screw 픽스처에 diameterMm 누락 버그가 있었을 때 이렇게
+    // 재현됐다(버그 자체는 수정됨). 앞으로 같은 상황에서 "테스트가 멈췄다"가 아니라
+    // 원인이 콘솔에 바로 보이도록 각 테스트를 try/catch로 감싼다.
+    struct NamedTest {
+        const char* name;
+        void (*fn)();
+    };
+    const NamedTest tests[] = {
+        {"TestNearestPairPicksTrueMatchAmongDistractors", TestNearestPairPicksTrueMatchAmongDistractors},
+        {"TestBossScrewRuleAcrossInches", TestBossScrewRuleAcrossInches},
+        {"TestHookHeightRuleAcrossInches", TestHookHeightRuleAcrossInches},
+        {"TestHookCatchRuleAcrossInches", TestHookCatchRuleAcrossInches},
+        {"TestRibOpenCellGapRuleAcrossInches", TestRibOpenCellGapRuleAcrossInches},
+        {"TestWallThicknessRuleAcrossInches", TestWallThicknessRuleAcrossInches},
+        {"TestOverallSizeRulesScaleWithInchExceptDepth", TestOverallSizeRulesScaleWithInchExceptDepth},
+        {"TestParallelFacePairRejectsNonAntiParallelCandidates", TestParallelFacePairRejectsNonAntiParallelCandidates},
+    };
+    for (const auto& test : tests) {
+        try {
+            test.fn();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "FAIL: %s threw: %s\n", test.name, e.what());
+            ++g_failures;
+        }
+    }
 
     if (g_failures == 0) {
         std::printf("All rule engine tests passed.\n");

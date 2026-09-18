@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <string>
 #include <vector>
 
@@ -30,6 +31,11 @@ struct AnchorCandidate {
     // 씀). "지름은 같은데 축 방향이 달라 실제로는 다른 형상"인 후보를 구분하는 데 쓰인다
     // (as1_pe.stp 실측: Ø254mm 원통 58개가 지름만으로는 전혀 안 걸러졌던 문제).
     Vec3 axis;
+    // § 형상 프리셋(2026-09-18) - FindPatchCandidates(PatchCandidate) 결과를
+    // AnchorCandidate로 변환할 때만 0보다 큰 값이 채워진다(RuleEngine::ResolveAnchorCandidates
+    // 참고). 일반 Hole/Boss_Center 등 기존 경로에서는 항상 0 - rule::SelectBestPatchMatch가
+    // 이 값이 채워진 후보만 자동으로 최고점을 고른다.
+    double patchSimilarity = 0.0;
 };
 
 // point_to_plane 측정의 기준 평면 후보. 평면 위 한 점 + 법선벡터로 표현.
@@ -99,6 +105,46 @@ struct PickResult {
     std::vector<Vec3> highlightEdgeSegments;
 };
 
+// § 형상 프리셋(2026-09-18) - FindPatchCandidates 결과를 채택할지 판정하는 공용 임계값.
+// RuleEngine(자동 적용 단계)과 UI(프리셋 등록/검색 미리보기)가 같은 값을 써야 "등록할 때
+// 보이던 후보 개수"와 "실제 측정에 쓰이는 후보 개수"가 어긋나지 않는다. 초기값 - 실제
+// Hook/Flange 표본으로 튜닝 필요(지름 필터의 kDiameterMatchToleranceMm 도입 때와 같은 패턴).
+constexpr double kPatchSimilarityThreshold = 0.75;
+
+// Hook/Flange류처럼 원통/평면 판별 하나로는 못 잡는 복합 형상을, 부품 이름도 없는 상태
+// (회사 STEP은 전부 UNITE된 단일 ITEM, 사용자 확인)에서 "생김새"로 식별하기 위한 지문.
+// 실제 계산(면 인접 확장 + OCCT 지오메트리 질의)은 geometry::FeaturePatch(FeaturePatch.h,
+// StepGeometryAdapter.cpp 내부 전용)가 담당하고, 이 구조체 자체는 OCCT 타입을 전혀 안
+// 써서 공개 인터페이스에 그대로 노출한다 - DB에도 그대로 직렬화해서 저장(shape_presets).
+struct FeaturePatchDescriptor {
+    // GeomAbs_SurfaceType(Plane=0, Cylinder=1, Cone=2, Sphere=3, Torus=4,
+    // BezierSurface=5, BSplineSurface=6, SurfaceOfRevolution=7, SurfaceOfExtrusion=8,
+    // OffsetSurface=9, OtherSurface=10) 별 면 개수.
+    std::array<int, 11> surfaceTypeCounts{};
+    int faceCount = 0;
+    // 패치 로컬 bbox 축별 길이를 최댓값 기준 정규화(0~1) - 스케일 무관, 형상 비율만 남김.
+    double bboxRatioX = 1.0;
+    double bboxRatioY = 1.0;
+    double bboxRatioZ = 1.0;
+    // 패치 외곽 경계 총 길이 / bbox 대각선.
+    double boundaryLengthRatio = 0.0;
+    // 원통/원뿔/토러스 면 중 가장 큰 반지름 / bbox 대각선(없으면 0).
+    double dominantRadiusRatio = 0.0;
+};
+
+// 뷰어에서 클릭 한 번으로 형상을 "등록"한 결과 - 지문 + 대표 위치(면적 가중 중심).
+struct FeaturePatchCapture {
+    FeaturePatchDescriptor descriptor;
+    Vec3 position;
+    bool valid = false; // clickPoint 근처에서 형상을 못 찾으면 false
+};
+
+// FindPatchCandidates 결과 하나 - AnchorCandidate와 같은 성격(좌표 + 이번엔 유사도 점수).
+struct PatchCandidate {
+    Vec3 position;
+    double similarity = 0.0;
+};
+
 using ModelHandle = int;
 constexpr ModelHandle kInvalidModelHandle = -1;
 
@@ -131,6 +177,24 @@ public:
         (void)rayOrigin;
         (void)rayDir;
         return PickResult{};
+    }
+
+    // § 형상 프리셋 - clickPoint 근처의 면에서 시작해 인접 면으로 확장한 패치의 지문을
+    // 계산한다. 실 형상 B-rep이 없는 어댑터(Mock, 미구현 NxJt)는 override 불필요.
+    virtual FeaturePatchCapture CaptureFeaturePatch(ModelHandle handle, const Vec3& clickPoint) const {
+        (void)handle;
+        (void)clickPoint;
+        return FeaturePatchCapture{};
+    }
+
+    // descriptor와 비슷한 패치를 모델 전체에서 찾는다(같은 모델 내 "나머지 찾기"와 다른
+    // 인치 모델 검색에 공용 - 호출 쪽이 결과 중 원본과 가까운 위치를 제외하면 된다).
+    virtual std::vector<PatchCandidate> FindPatchCandidates(
+        ModelHandle handle, const FeaturePatchDescriptor& descriptor, double similarityThreshold) const {
+        (void)handle;
+        (void)descriptor;
+        (void)similarityThreshold;
+        return {};
     }
 
     // 뷰어가 실제 렌더링에 쓰는 삼각형 메시. 연속된 3개 Vec3가 삼각형 1개(flat 셰이딩,

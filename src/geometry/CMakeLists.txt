@@ -55,6 +55,8 @@ add_library(geometry STATIC
     NxJtGeometryAdapter.cpp
     StepGeometryAdapter.h
     StepGeometryAdapter.cpp
+    FeaturePatch.h
+    FeaturePatch.cpp
     AlignmentCheck.h
     AlignmentCheck.cpp
 )

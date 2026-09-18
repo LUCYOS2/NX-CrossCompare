@@ -4,12 +4,63 @@
 
 #include <sqlite3.h>
 
+#include <sstream>
 #include <stdexcept>
 #include <utility>
 
 namespace database {
 
 namespace {
+
+// § 형상 프리셋 지문 직렬화(2026-09-18) - 별도 JSON 라이브러리 없이 콤마/파이프
+// 구분 텍스트로 저장한다: "히스토그램11개(콤마)|faceCount|bboxX|bboxY|bboxZ|
+// boundaryRatio|radiusRatio". geometry::FeaturePatchDescriptor는 OCCT 타입이 없는
+// 순수 데이터라 이 파일(OCCT 비의존)에서 그대로 다뤄도 안전하다.
+std::string SerializeDescriptor(const geometry::FeaturePatchDescriptor& d) {
+    std::ostringstream oss;
+    for (size_t i = 0; i < d.surfaceTypeCounts.size(); ++i) {
+        if (i > 0) oss << ',';
+        oss << d.surfaceTypeCounts[i];
+    }
+    oss << '|' << d.faceCount << '|' << d.bboxRatioX << '|' << d.bboxRatioY << '|' << d.bboxRatioZ << '|'
+        << d.boundaryLengthRatio << '|' << d.dominantRadiusRatio;
+    return oss.str();
+}
+
+geometry::FeaturePatchDescriptor DeserializeDescriptor(const std::string& text) {
+    geometry::FeaturePatchDescriptor d;
+    std::istringstream iss(text);
+
+    std::string histogramPart;
+    if (!std::getline(iss, histogramPart, '|')) {
+        return d;
+    }
+    std::istringstream histStream(histogramPart);
+    std::string token;
+    size_t idx = 0;
+    while (idx < d.surfaceTypeCounts.size() && std::getline(histStream, token, ',')) {
+        d.surfaceTypeCounts[idx++] = std::stoi(token);
+    }
+
+    std::string field;
+    if (std::getline(iss, field, '|')) d.faceCount = std::stoi(field);
+    if (std::getline(iss, field, '|')) d.bboxRatioX = std::stod(field);
+    if (std::getline(iss, field, '|')) d.bboxRatioY = std::stod(field);
+    if (std::getline(iss, field, '|')) d.bboxRatioZ = std::stod(field);
+    if (std::getline(iss, field, '|')) d.boundaryLengthRatio = std::stod(field);
+    if (std::getline(iss, field, '|')) d.dominantRadiusRatio = std::stod(field);
+    return d;
+}
+
+// anchor_type이 "preset:<이름>"이면 그 이름을 반환하고, 아니면 nullopt.
+std::optional<std::string> ExtractPresetName(const std::string& anchorType) {
+    constexpr const char* kPrefix = "preset:";
+    constexpr size_t kPrefixLen = 7;
+    if (anchorType.rfind(kPrefix, 0) != 0) {
+        return std::nullopt;
+    }
+    return anchorType.substr(kPrefixLen);
+}
 
 // 준비된 statement를 스코프 종료 시 자동으로 finalize하는 RAII 래퍼.
 class Stmt {
@@ -104,6 +155,20 @@ CREATE TABLE IF NOT EXISTS points (
     x REAL NOT NULL,
     y REAL NOT NULL,
     z REAL NOT NULL
+);
+
+-- § 형상 프리셋(2026-09-18) - Hook/Flange류처럼 원통/평면 판별 하나로는 못 잡는 복합
+-- 형상을 지문(FeaturePatchDescriptor)으로 등록해두고 재사용한다(geometry/FeaturePatch.h,
+-- rule::Anchor.patchDescriptor 참고). descriptor는 콤마 구분 텍스트로 직렬화한다(별도
+-- JSON 라이브러리 의존성 없이 - SerializeDescriptor/DeserializeDescriptor 참고).
+CREATE TABLE IF NOT EXISTS shape_presets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id),
+    name TEXT NOT NULL,
+    descriptor_text TEXT NOT NULL,
+    image_path TEXT,
+    dim_filter_kind TEXT,      -- 'diameter' | 'height' | 'width' | NULL(필터 안 씀)
+    dim_filter_value_mm REAL
 );
 )SQL";
 
@@ -275,17 +340,19 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
 rule::Rule Database::LoadRule(int ruleId) {
     rule::Rule r;
     r.id = ruleId;
+    int projectId = 0;
 
     {
         Stmt stmt(db_,
             "SELECT name, measurement_type, projection, tolerance_plus_mm, tolerance_minus_mm, "
             "plane_type, plane_part_name, image_path, plane_normal_axis, plane_normal_tolerance_deg, ctq_code, "
-            "check_point_category "
+            "check_point_category, project_id "
             "FROM rules WHERE id = ?;");
         stmt.BindInt(1, ruleId);
         if (!stmt.Step()) {
             throw std::runtime_error("rule not found: id=" + std::to_string(ruleId));
         }
+        projectId = stmt.ColumnInt(12);
         r.name = stmt.ColumnText(0);
         r.measurementType = rule::MeasurementTypeFromString(stmt.ColumnText(1));
         r.projection = stmt.ColumnText(2);
@@ -330,6 +397,18 @@ rule::Rule Database::LoadRule(int ruleId) {
             if (!stmt.IsNull(5)) {
                 anchor.directionAxis = stmt.ColumnText(5);
                 anchor.directionToleranceDeg = stmt.ColumnDouble(6);
+            }
+            // § 형상 프리셋 - anchor_type이 "preset:<이름>"이면 같은 프로젝트의
+            // shape_presets에서 지문을 찾아 채운다(RuleEngine이 이 필드로 원통/평면
+            // 대신 FindPatchCandidates 경로를 탄다).
+            if (const auto presetName = ExtractPresetName(anchor.anchorType)) {
+                Stmt presetStmt(db_,
+                    "SELECT descriptor_text FROM shape_presets WHERE project_id = ? AND name = ? LIMIT 1;");
+                presetStmt.BindInt(1, projectId);
+                presetStmt.BindText(2, *presetName);
+                if (presetStmt.Step()) {
+                    anchor.patchDescriptor = DeserializeDescriptor(presetStmt.ColumnText(0));
+                }
             }
             r.anchors.push_back(std::move(anchor));
         }
@@ -512,6 +591,69 @@ void Database::DeleteRule(int ruleId) {
     }
     Stmt stmt(db_, "DELETE FROM rules WHERE id = ?;");
     stmt.BindInt(1, ruleId);
+    stmt.Step();
+}
+
+int Database::SaveShapePreset(
+    int projectId, const std::string& name, const geometry::FeaturePatchDescriptor& descriptor,
+    const std::string& imagePath, const std::optional<std::string>& dimFilterKind,
+    const std::optional<double>& dimFilterValueMm) {
+    Stmt stmt(db_,
+        "INSERT INTO shape_presets (project_id, name, descriptor_text, image_path, "
+        "dim_filter_kind, dim_filter_value_mm) VALUES (?, ?, ?, ?, ?, ?);");
+    stmt.BindInt(1, projectId);
+    stmt.BindText(2, name);
+    stmt.BindText(3, SerializeDescriptor(descriptor));
+    if (!imagePath.empty()) {
+        stmt.BindText(4, imagePath);
+    } else {
+        stmt.BindNull(4);
+    }
+    if (dimFilterKind.has_value() && !dimFilterKind->empty()) {
+        stmt.BindText(5, *dimFilterKind);
+        stmt.BindDouble(6, dimFilterValueMm.value_or(0.0));
+    } else {
+        stmt.BindNull(5);
+        stmt.BindNull(6);
+    }
+    stmt.Step();
+    return static_cast<int>(stmt.LastInsertRowId());
+}
+
+std::vector<ShapePresetSummary> Database::LoadShapePresetsForProject(int projectId) {
+    std::vector<ShapePresetSummary> presets;
+    Stmt stmt(db_,
+        "SELECT id, name, image_path, dim_filter_kind, dim_filter_value_mm "
+        "FROM shape_presets WHERE project_id = ? ORDER BY id;");
+    stmt.BindInt(1, projectId);
+    while (stmt.Step()) {
+        ShapePresetSummary summary;
+        summary.id = stmt.ColumnInt(0);
+        summary.name = stmt.ColumnText(1);
+        if (!stmt.IsNull(2)) {
+            summary.imagePath = stmt.ColumnText(2);
+        }
+        if (!stmt.IsNull(3)) {
+            summary.dimFilterKind = stmt.ColumnText(3);
+            summary.dimFilterValueMm = stmt.ColumnDouble(4);
+        }
+        presets.push_back(std::move(summary));
+    }
+    return presets;
+}
+
+geometry::FeaturePatchDescriptor Database::LoadShapePresetDescriptor(int presetId) {
+    Stmt stmt(db_, "SELECT descriptor_text FROM shape_presets WHERE id = ?;");
+    stmt.BindInt(1, presetId);
+    if (!stmt.Step()) {
+        throw std::runtime_error("shape preset not found: id=" + std::to_string(presetId));
+    }
+    return DeserializeDescriptor(stmt.ColumnText(0));
+}
+
+void Database::DeleteShapePreset(int presetId) {
+    Stmt stmt(db_, "DELETE FROM shape_presets WHERE id = ?;");
+    stmt.BindInt(1, presetId);
     stmt.Step();
 }
 

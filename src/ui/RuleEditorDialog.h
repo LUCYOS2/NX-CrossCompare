@@ -109,6 +109,10 @@ private slots:
     void onSaveAsClicked();
     void onDeleteClicked();
     void onSearchPointClicked();
+    // § 형상 프리셋(2026-09-18) - "프리셋으로 추가..." 버튼. ShapePresetDialog를 열어
+    // 저장된 프리셋 중 하나를 고르게 하고, "preset:<이름>" anchor_type으로 포인트를
+    // 추가한다(원통이 아닌 Hook/Flange류 형상도 다른 인치에 자동 적용 가능하게).
+    void onAddPresetPointClicked();
     void onPickPointClicked();
     void onDeletePointClicked();
     void onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir);
@@ -298,6 +302,7 @@ private:
     QComboBox* nextPointDirection_;
     QPushButton* pickPointButton_;
     QPushButton* searchPointButton_;
+    QPushButton* presetPointButton_;
     QPushButton* deletePointButton_;
     QLabel* pickStatusLabel_;
 

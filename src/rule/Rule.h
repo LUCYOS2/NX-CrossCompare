@@ -1,5 +1,7 @@
 #pragma once
 
+#include "geometry/IGeometryAdapter.h"
+
 #include <optional>
 #include <string>
 #include <vector>
@@ -10,7 +12,7 @@ namespace rule {
 // "single"(point_to_plane처럼 anchor가 하나뿐인 경우)로 구분한다.
 struct Anchor {
     std::string role;
-    std::string anchorType; // Hole, Boss_Center, Hook_Tip_Edge, Face, ...
+    std::string anchorType; // Hole, Boss_Center, Hook_Tip_Edge, Face, "preset:<이름>", ...
     std::string partName;   // Bezel, Rear_Chassis, ...
     std::optional<std::string> paramKey;   // 예: "diameter"
     std::optional<double> paramValue;      // 예: 2.8
@@ -19,6 +21,12 @@ struct Anchor {
     // directionToleranceDeg(기본 5도) 이내로 평행한 후보만 남긴다.
     std::optional<std::string> directionAxis;
     std::optional<double> directionToleranceDeg;
+    // § 형상 프리셋(2026-09-18) - anchorType이 "preset:<이름>"이면 채워진다. 값이 있으면
+    // RuleEngine이 FindAnchorCandidates 대신 adapter.FindPatchCandidates로 이 지문과
+    // 비슷한 형상을 찾고, 유사도 최고점을 자동 선택한다(rule::SelectBestPatchMatch) -
+    // Hole/Boss_Center처럼 anchorType 문자열 자체가 아니라 등록 시점에 캡처한 지문이
+    // 필요해서 별도 필드로 들고 다닌다.
+    std::optional<geometry::FeaturePatchDescriptor> patchDescriptor;
 };
 
 enum class MeasurementType {

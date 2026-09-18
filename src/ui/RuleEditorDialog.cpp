@@ -2,6 +2,7 @@
 
 #include "rule/BuiltInCatalog.h"
 #include "ui/AnchorSearchDialog.h"
+#include "ui/ShapePresetDialog.h"
 #include "viewer/MultiViewportPanel.h"
 
 #include <QAbstractItemView>
@@ -140,6 +141,11 @@ RuleEditorDialog::RuleEditorDialog(
     connect(pickPointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onPickPointClicked);
     searchPointButton_ = new QPushButton("검색으로 추가...", this);
     connect(searchPointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onSearchPointClicked);
+    // § 형상 프리셋(2026-09-18) - Hole/Boss_Center(원통) 외 Hook/Flange류처럼 부품
+    // 이름도 없는 복합 형상을 자동 검색하기 위한 별도 경로. AnchorSearchDialog는
+    // anchor_type이 Hole/Boss_Center로 고정돼 있어 여기서는 못 다룬다.
+    presetPointButton_ = new QPushButton("프리셋으로 추가...", this);
+    connect(presetPointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onAddPresetPointClicked);
     deletePointButton_ = new QPushButton("선택 포인트 삭제", this);
     connect(deletePointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onDeletePointClicked);
 
@@ -151,6 +157,7 @@ RuleEditorDialog::RuleEditorDialog(
     pointMeasureSection->addStretch(1);
     pointMeasureSection->addWidget(pickPointButton_);
     pointMeasureSection->addWidget(searchPointButton_);
+    pointMeasureSection->addWidget(presetPointButton_);
     pointMeasureSection->addWidget(deletePointButton_);
 
     // ---- 우측: 3) 관리 항목 ----
@@ -844,6 +851,10 @@ void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
         } else if (a.anchorType == "Intersection_Point") {
             p.kind = geometry::PickedFaceKind::Point;
             p.pointSubKind = geometry::PointSubKind::Intersection;
+        } else if (a.anchorType.rfind("preset:", 0) == 0) {
+            // § 형상 프리셋 - Cylinder처럼 "점 하나를 대표"하는 형상이지 실제 원통은
+            // 아니므로 Point로 분류(onAddPresetPointClicked과 동일한 판단).
+            p.kind = geometry::PickedFaceKind::Point;
         } else {
             p.kind = geometry::PickedFaceKind::Cylinder;
         }
@@ -1109,6 +1120,50 @@ void RuleEditorDialog::onSearchPointClicked() {
         entry.modelHandle = dialog.SelectedModelHandle();
         AddPoint(entry);
     }
+}
+
+void RuleEditorDialog::onAddPresetPointClicked() {
+    if (points_.size() >= 2) {
+        QMessageBox::information(
+            this, "추가 불가",
+            "포인트는 최대 2개까지 추가할 수 있습니다 - 이미 2개가 있습니다. \"선택 포인트 삭제\"로 지우고 "
+            "다시 시도하세요.");
+        return;
+    }
+    ShapePresetDialog dialog(db_, projectId_, adapter_, models_, this);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    const auto preset = dialog.SelectedPreset();
+    if (!preset) {
+        return;
+    }
+    const geometry::ModelHandle handle = dialog.SelectedModelHandle();
+    const geometry::FeaturePatchDescriptor descriptor = dialog.SelectedDescriptor();
+
+    PointEntry entry;
+    entry.type = "preset:" + preset->name;
+    entry.partName.clear();
+    entry.directionAxis = CurrentDirectionFilter();
+    // § 형상 프리셋 - Cylinder/Point와 마찬가지로 "점 하나를 대표하는" 형상이다
+    // (TryInferMeasurementType의 isPointLike 판정 참고).
+    entry.kind = geometry::PickedFaceKind::Point;
+    entry.modelHandle = handle;
+
+    // § 즉시 미리보기 - 대표 인치에서 한 번 검색해서 유사도 최고점 위치를 바로
+    // 마커로 보여준다(저장 후 실제 다른 인치 적용은 RuleEngine이 알아서 한다 -
+    // 여기서는 사용자가 "제대로 등록됐는지" 바로 확인하기 위한 편의 기능일 뿐).
+    const auto candidates = adapter_->FindPatchCandidates(handle, descriptor, geometry::kPatchSimilarityThreshold);
+    if (!candidates.empty()) {
+        const auto best = std::max_element(
+            candidates.begin(), candidates.end(),
+            [](const geometry::PatchCandidate& a, const geometry::PatchCandidate& b) {
+                return a.similarity < b.similarity;
+            });
+        entry.hasPosition = true;
+        entry.position = best->position;
+    }
+    AddPoint(entry);
 }
 
 void RuleEditorDialog::onPickPointClicked() {
