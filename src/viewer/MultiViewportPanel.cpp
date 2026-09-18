@@ -468,25 +468,24 @@ void MultiViewportPanel::snapToNegXZView() {
 // 화면 프레임 안에 들어와도 한쪽 구석에 점처럼 작게 찍혀 사실상 안 보이는 문제가 있었다
 // (사용자 리포트: STEP을 불러왔는데 뷰포트에 아무것도 안 보임). 이제 bounding box 중심을
 // 구해서 현재 회전(yaw/pitch) 기준으로 화면 정중앙에 오도록 팬을 계산한다.
+//
+// § 화면 채움 비율 개선(2026-09-18) - 예전엔 bbox의 "3D 대각선" 절반(halfDiagonal)을
+// 기준으로 거리를 잡았는데, 이건 어느 각도에서 봐도 안 잘리는 최악의 경우(정확히
+// 대각선 방향으로 보는 경우) 기준이라 FRONT/TOP/ISO처럼 실제로는 대각선보다 훨씬 작게
+// 보이는 각도에서도 항상 여유가 넘쳐서 모델이 화면에 작게 찍히는 문제가 있었다(사용자
+// 리포트: "F 눌러도 너무 멀다/작다"). 대신 bbox 8개 꼭짓점을 현재 회전으로 실제 투영해
+// 화면상 보이는 가로/세로 절반 크기를 직접 구하고, 그 값에 맞춰 거리를 잡는다 - 지금
+// 보고 있는 각도에서 실제로 필요한 만큼만 줌인된다.
 void MultiViewportPanel::fitToView() {
     if (handles_.empty()) {
         return;
     }
 
     const geometry::BoundingBox unionBox = unionBoxOfHandles();
-    const double dx = unionBox.max.x - unionBox.min.x;
-    const double dy = unionBox.max.y - unionBox.min.y;
-    const double dz = unionBox.max.z - unionBox.min.z;
-    const double halfDiagonal = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5;
-    if (halfDiagonal <= 0.0) {
-        return;
-    }
-    // tan(22.5deg) ~= 0.414 (paintGL의 45도 수직 FOV 절반) 만큼 여유를 두고 맞춘다.
-    camera_.distance = static_cast<float>(halfDiagonal / 0.414 * 1.15);
-
     const QVector3D center(static_cast<float>((unionBox.min.x + unionBox.max.x) * 0.5),
                             static_cast<float>((unionBox.min.y + unionBox.max.y) * 0.5),
                             static_cast<float>((unionBox.min.z + unionBox.max.z) * 0.5));
+
     // Camera::ViewMatrix()는 translate(pan) * rotateX(pitch) * rotateY(yaw) 순서로 곱해지므로
     // (한 점에 적용하면 회전이 먼저 적용됨), 여기서도 같은 순서로 회전만 미리 적용해 본 뒤
     // 그 결과가 화면 중앙(x=0,y=0)에 오도록 팬을 역산한다.
@@ -496,6 +495,42 @@ void MultiViewportPanel::fitToView() {
     const QVector3D rotatedCenter = rotationOnly * center;
     camera_.panX = -rotatedCenter.x();
     camera_.panY = -rotatedCenter.y();
+
+    // bbox 8개 꼭짓점을 회전시켜 화면(x,y) 평면상 center 기준 최대 편차를 구한다 -
+    // 이게 "지금 각도에서 실제로 보이는" 절반 너비/높이다.
+    const QVector3D corners[8] = {
+        {static_cast<float>(unionBox.min.x), static_cast<float>(unionBox.min.y), static_cast<float>(unionBox.min.z)},
+        {static_cast<float>(unionBox.max.x), static_cast<float>(unionBox.min.y), static_cast<float>(unionBox.min.z)},
+        {static_cast<float>(unionBox.min.x), static_cast<float>(unionBox.max.y), static_cast<float>(unionBox.min.z)},
+        {static_cast<float>(unionBox.max.x), static_cast<float>(unionBox.max.y), static_cast<float>(unionBox.min.z)},
+        {static_cast<float>(unionBox.min.x), static_cast<float>(unionBox.min.y), static_cast<float>(unionBox.max.z)},
+        {static_cast<float>(unionBox.max.x), static_cast<float>(unionBox.min.y), static_cast<float>(unionBox.max.z)},
+        {static_cast<float>(unionBox.min.x), static_cast<float>(unionBox.max.y), static_cast<float>(unionBox.max.z)},
+        {static_cast<float>(unionBox.max.x), static_cast<float>(unionBox.max.y), static_cast<float>(unionBox.max.z)},
+    };
+    float halfVisibleWidth = 0.0f;
+    float halfVisibleHeight = 0.0f;
+    for (const auto& corner : corners) {
+        const QVector3D rotated = rotationOnly * corner;
+        halfVisibleWidth = std::max(halfVisibleWidth, std::abs(rotated.x() - rotatedCenter.x()));
+        halfVisibleHeight = std::max(halfVisibleHeight, std::abs(rotated.y() - rotatedCenter.y()));
+    }
+    if (halfVisibleWidth <= 0.0f && halfVisibleHeight <= 0.0f) {
+        return;
+    }
+
+    // 뷰포트 종횡비(가로/세로) - 여러 뷰포트가 폭을 나눠 쓰므로 대표로 첫 번째 것을 쓴다
+    // (레이아웃상 서로 거의 동일한 비율).
+    float aspect = 1.0f;
+    if (!viewports_.empty() && viewports_.front()->height() > 0) {
+        aspect = static_cast<float>(viewports_.front()->width()) /
+                 static_cast<float>(viewports_.front()->height());
+    }
+    constexpr float kHalfFovTan = 0.414f; // ModelViewport.cpp의 동일 상수와 맞춤(45도 수직 FOV 절반)
+    constexpr float kMargin = 1.15f;
+    const float distanceForHeight = (halfVisibleHeight * kMargin) / kHalfFovTan;
+    const float distanceForWidth = (halfVisibleWidth * kMargin) / (kHalfFovTan * aspect);
+    camera_.distance = std::max(distanceForHeight, distanceForWidth);
 
     for (auto* vp : viewports_) {
         // F/I는 "전체 공통 리셋" 동작이라, 독립 조작 모드 중이었더라도 각 뷰포트의 로컬
