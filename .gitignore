@@ -33,6 +33,9 @@ Makefile
 # 규칙별 캡쳐 이미지(런타임 산출물) - RuleEditorDialog::onCaptureRuleImageClicked
 rule_images/
 
+# 로컬 테스트용 STEP 샘플/스크린샷/동영상(2026-09-18) - 저장소에 안 올림, 로컬 검증 전용
+samples/
+
 # Python
 __pycache__/
 *.pyc
