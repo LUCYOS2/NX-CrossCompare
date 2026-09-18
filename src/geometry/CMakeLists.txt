@@ -19,15 +19,21 @@
 # 공식 SDK의 OpenCASCADEConfig.cmake에서 직접 확인한 유효 값은 FoundationClasses,
 # ModelingData, ModelingAlgorithms, Visualization, ApplicationFramework, DataExchange,
 # Draw 7개뿐이다(2026-09-18 확인). 우리는 STEP 파싱/B-rep 분석/테셀레이션만 필요하고
-# 자체 렌더링은 Qt/OpenGL로 직접 하므로 VTK를 끌어오는 Visualization/Draw는 빼고,
-# FoundationClasses(TKernel/TKMath 등) + ModelingData(TKBRep/TKG3d 등) +
-# ModelingAlgorithms(TKTopAlgo/TKBool/TKMesh 등) + DataExchange(TKDESTEP 등)만 쓴다.
+# 자체 렌더링은 Qt/OpenGL로 직접 하므로 VTK를 끌어오는 Draw는 뺐는데, DataExchange
+# 단독으로는 STEPCAFControl(XCAF 기반 STEP 리더)이 요구하는 TKCAF/TKCDF/TKLCAF/TKVCAF/
+# TKBin*/TKStd*/TKXml*(-> ApplicationFramework 모듈) 및 TKService/TKV3d
+# (-> Visualization 모듈) 타겟이 정의되지 않아 configure가 또 실패했다(원격 PC 확인,
+# 2026-09-18). 그래서 ApplicationFramework/Visualization도 추가한다 - Visualization을
+# 넣으면 애초에 피하려던 VTK 참조가 되살아날 수도 있는데, 그건 실제로 콘피규어해봐야
+# 확인 가능하다(로컬 vcpkg 환경에서는 이 COMPONENTS 방식 자체가 지원되지 않아 재현/
+# 검증 불가 - 원격 PC에서 직접 시도해서 결과를 알려줘야 다음 단계를 정할 수 있다).
 option(NX_OCCT_COMPONENTS_ONLY
-    "공식 OpenCASCADE SDK(예: VTK 지원 포함 빌드)에서 Visualization/Draw(VTK) 타겟을 \
+    "공식 OpenCASCADE SDK(예: VTK 지원 포함 빌드)에서 Draw(VTK) 타겟을 \
 피하려면 ON - vcpkg 환경에서는 OFF(기본값) 유지" OFF)
 if(NX_OCCT_COMPONENTS_ONLY)
     find_package(OpenCASCADE CONFIG REQUIRED COMPONENTS
-        FoundationClasses ModelingData ModelingAlgorithms DataExchange
+        FoundationClasses ModelingData ModelingAlgorithms
+        ApplicationFramework DataExchange Visualization
     )
 else()
     find_package(OpenCASCADE CONFIG REQUIRED)
