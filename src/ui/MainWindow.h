@@ -48,6 +48,8 @@ private slots:
     // § 불러온 파일 관리(2026-09-18) - 인치 미지정 파일까지 포함해서 불러온 파일 전부를
     // 보여주고 개별 삭제한다(비교 테이블 헤더 클릭 삭제는 인치 미지정 항목을 못 다룸).
     void onManageLoadedFilesClicked();
+    // § 매칭 진단(2026-11-04) - "검증 → 매칭 진단..." 메뉴. 불러온 인치들로 MatchingDiagnosticsDialog를 연다.
+    void onMatchingDiagnosticsClicked();
 
 private:
     void setupMenuBar();

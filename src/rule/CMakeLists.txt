@@ -9,6 +9,8 @@ add_library(rule STATIC
     Selector.cpp
     Matching.h
     Matching.cpp
+    MatchingDiagnostics.h
+    MatchingDiagnostics.cpp
     RuleEngine.h
     RuleEngine.cpp
     BuiltInCatalog.h

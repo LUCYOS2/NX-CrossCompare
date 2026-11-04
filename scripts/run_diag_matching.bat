@@ -73,6 +73,14 @@ call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" >nul
 :env_ready
 
 rem ----- 3. Build the diagnostic tool -----------------------------------------
+rem Refresh the build files first: NMake does not regenerate them when a single
+rem target is requested, so a build folder configured before diag_measure_matching
+rem existed fails with "U1073: don't know how to make 'diag_measure_matching'".
+rem Passing the existing build folder keeps every cached option (OCCT paths etc.).
+echo.
+echo Refreshing build files ...
+"%CMAKE_EXE%" "%BUILD%"
+if errorlevel 1 goto :build_failed
 echo.
 echo Building diag_measure_matching ...
 "%CMAKE_EXE%" --build "%BUILD%" --target diag_measure_matching --config %CONFIG%

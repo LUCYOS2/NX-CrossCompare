@@ -38,6 +38,7 @@
 #include "rule/BuiltInCatalog.h"
 #include "rule/RuleEngine.h"
 #include "ui/ImportInchDialog.h"
+#include "ui/MatchingDiagnosticsDialog.h"
 #include "ui/RuleEditorDialog.h"
 #include "ui/ShapePresetDialog.h"
 #include "viewer/MultiViewportPanel.h"
@@ -160,6 +161,29 @@ void MainWindow::setupMenuBar() {
     auto* ruleMenu = bar->addMenu("규칙 관리");
     auto* addRuleAction = ruleMenu->addAction("+ 새 규칙 추가");
     connect(addRuleAction, &QAction::triggered, this, &MainWindow::onAddRuleClicked);
+
+    // § 매칭 진단(2026-11-04) - 불러온 인치들로 매칭 정확도를 바로 검사한다(MatchingDiagnosticsDialog).
+    auto* verifyMenu = bar->addMenu("검증");
+    auto* diagnosticsAction = verifyMenu->addAction("매칭 진단...");
+    connect(diagnosticsAction, &QAction::triggered, this, &MainWindow::onMatchingDiagnosticsClicked);
+}
+
+void MainWindow::onMatchingDiagnosticsClicked() {
+    std::vector<MatchingDiagnosticsDialog::Model> models;
+    for (const auto& entry : inchFiles_) {
+        if (entry.inch <= 0) {
+            continue; // 인치 미지정 파일은 비교 테이블과 같은 기준으로 제외
+        }
+        const QString fileName = QFileInfo(QString::fromStdString(entry.filePath)).fileName();
+        models.push_back({QString("%1  %2").arg(ui::FormatInchLabel(entry.inch)).arg(fileName), entry.handle});
+    }
+    if (models.empty()) {
+        QMessageBox::information(this, "매칭 진단",
+                                 "먼저 \"가져오기/내보내기 → STEP(.stp) 파일 불러오기\"로 인치를 지정해 도면을 불러오세요.");
+        return;
+    }
+    MatchingDiagnosticsDialog dialog(*adapter_, std::move(models), this);
+    dialog.exec();
 }
 
 std::vector<int> MainWindow::LoadedInches() const {
