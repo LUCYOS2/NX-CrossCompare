@@ -8,7 +8,9 @@
 // 한 번에 돌리거나 로그로 남길 때 쓴다(scripts/run_diag_matching.bat).
 
 #ifdef _WIN32
+#ifndef NOMINMAX // 보통 CMake(루트 CMakeLists.txt)가 이미 정의해서 넘겨준다
 #define NOMINMAX
+#endif
 #include <windows.h>
 #endif
 

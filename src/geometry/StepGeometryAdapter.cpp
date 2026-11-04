@@ -4,6 +4,11 @@
 // 필요로 하는 winnls.h 선언들이 빠진 채로 남는다 - 먼저 완전한 windows.h를 넣어서 이
 // 문제를 피한다.
 #ifdef _WIN32
+// min/max 매크로가 std::max/numeric_limits::max를 깨뜨리지 않게(보통 CMake가 이미 넘겨줌 - 루트
+// CMakeLists.txt 참고, 회사PC의 OCCT 직접 링크 빌드에서 빠져 오류 100여 개가 났었다).
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <stringapiset.h>
 #endif

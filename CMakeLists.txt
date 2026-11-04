@@ -17,6 +17,15 @@ if(MSVC)
   add_compile_options(/utf-8)
 endif()
 
+# windows.h가 min/max를 매크로로 정의하지 못하게 한다 - 안 그러면 std::max(...)/
+# numeric_limits<double>::max()가 "함수 같은 매크로 호출 'max'에 대해 인수가 부족합니다"로 깨진다.
+# vcpkg OCCT(find_package)는 임포트 타겟이 NOMINMAX를 같이 넘겨줘서 안 보였지만, 회사PC의
+# NX_OCCT_DIRECT_LINK(TK*.lib 직접 링크) 빌드에서는 빠져서 터졌다(2026-11-04) - 연결 방식과
+# 무관하게 프로젝트 전체에 직접 건다.
+if(WIN32)
+  add_compile_definitions(NOMINMAX)
+endif()
+
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
