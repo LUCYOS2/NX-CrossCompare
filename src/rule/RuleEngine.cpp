@@ -1,5 +1,6 @@
 #include "rule/RuleEngine.h"
 
+#include "rule/Matching.h"
 #include "rule/Measure.h"
 #include "rule/Selector.h"
 
@@ -26,9 +27,21 @@ std::vector<geometry::AnchorCandidate> ApplyDiameterFilter(
 
 // 지름 필터와 축 방향 필터를 함께 적용(AND) - Anchor가 별개 필드로 들고 있어서
 // 순서대로 걸어주기만 하면 된다.
+//
+// § 형상 프리셋 버그 수정(2026-09-18) - "hook 높이 규칙이 failed to resolve anchor pair
+// (ambiguous candidates)로 실패한다"는 리포트. 프리셋 기반 후보(patchSimilarity>0)는
+// candidate.axis를 채우지 않는다(원통이 아니라 "축" 개념 자체가 없는 복합 형상이라서) -
+// 항상 Vec3{0,0,0}인 채로 FilterByAxisDirection에 들어가면 NormalDot이 0벡터를 0.0으로
+// 취급해 각도가 90도로 계산되고, 그러면 기본 허용오차(5도)를 항상 벗어나 후보가 전부
+// 걸러진다. "축 방향" 필터(nextPointDirection_)를 "(필터 안 씀)"이 아닌 걸로 두고
+// 프리셋 포인트를 추가하면 항상 이렇게 됐다 - 프리셋 후보에는 이 필터를 아예 적용하지
+// 않는다(애초에 축 개념이 없는 형상이라 필터링할 근거가 없음).
 std::vector<geometry::AnchorCandidate> ApplyAnchorFilters(
     std::vector<geometry::AnchorCandidate> candidates, const Anchor& anchor) {
     candidates = ApplyDiameterFilter(std::move(candidates), anchor);
+    if (anchor.patchDescriptor.has_value()) {
+        return candidates;
+    }
     candidates = FilterByAxisDirection(std::move(candidates), anchor.directionAxis, anchor.directionToleranceDeg);
     return candidates;
 }
@@ -109,6 +122,185 @@ std::optional<std::pair<geometry::AnchorCandidate, geometry::AnchorCandidate>> R
     return std::nullopt;
 }
 
+// § 측정 엔진 점 후보(2026-10-30) - 클릭 스냅으로 저장된 anchorType 문자열(RuleEditorDialog::
+// onFacePicked)을 엔진 검색 종류로 되돌린다. 점 종류가 아니면 None. 시작/끝점은 모서리 방향에
+// 따라 바뀌어 인치 간 구분이 안정적이지 않아 꼭짓점 하나로 합친다(IGeometryAdapter 참고).
+geometry::PointSubKind PointSubKindFromAnchorType(const std::string& anchorType) {
+    if (anchorType == "Vertex" || anchorType == "Start_Point" || anchorType == "End_Point") {
+        return geometry::PointSubKind::Vertex;
+    }
+    if (anchorType == "Edge_Midpoint") return geometry::PointSubKind::EdgeMidpoint;
+    if (anchorType == "Center_Point") return geometry::PointSubKind::Center;
+    if (anchorType == "Intersection_Point") return geometry::PointSubKind::Intersection;
+    return geometry::PointSubKind::None;
+}
+
+std::string AnchorLabel(const Anchor& anchor) {
+    return "포인트 " + anchor.role + "(" + anchor.anchorType + ")";
+}
+
+double Dot(const geometry::Vec3& a, const geometry::Vec3& b) {
+    return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+double Length(const geometry::Vec3& v) {
+    return std::sqrt(Dot(v, v));
+}
+
+// 두 방향의 코사인(부호 유지). 길이 0이면 0.
+double CosBetween(const geometry::Vec3& a, const geometry::Vec3& b) {
+    const double la = Length(a);
+    const double lb = Length(b);
+    if (la < 1e-12 || lb < 1e-12) {
+        return 0.0;
+    }
+    return Dot(a, b) / (la * lb);
+}
+
+double CosOfDeg(double deg) {
+    constexpr double kPi = 3.14159265358979323846;
+    return std::cos(deg * kPi / 180.0);
+}
+
+// § 인치 간 자동 매칭 - 클릭 좌표를 이 모델로 옮겨 그 근처의 유일한 후보를 고른다. 형상
+// 조건(종류/지름/축 방향)으로 먼저 거른 뒤 위치로 고르므로, 위치가 비슷해도 다른 형상은 안
+// 잡힌다. 실패하면 사유를 담아 던진다(Evaluate가 인치별 오류로 기록).
+geometry::AnchorCandidate MatchAnchorByRef(
+    const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, const Anchor& anchor) {
+    const geometry::BoundingBox targetBox = adapter.GetBoundingBox(handle);
+    const geometry::Vec3 predicted = PredictPosition(anchor.ref->position, anchor.ref->sourceBox, targetBox);
+    const double radius = MatchRadiusMm(targetBox);
+
+    std::vector<geometry::AnchorCandidate> candidates;
+    const geometry::PointSubKind subKind = PointSubKindFromAnchorType(anchor.anchorType);
+    if (subKind != geometry::PointSubKind::None && !anchor.patchDescriptor.has_value()) {
+        // 유일성(2등 후보) 판단까지 하려면 반경보다 넓게 가져와야 한다 - 1등이 반경 안이면
+        // 판단에 필요한 2등은 항상 2×반경+최소 간격 안에 있다(PickUniqueNearest 조건).
+        candidates = adapter.FindPointCandidates(handle, subKind, predicted, radius * 2.0 + kMatchMinSeparationMm);
+    } else {
+        candidates = ApplyAnchorFilters(ResolveAnchorCandidates(adapter, handle, anchor), anchor);
+    }
+
+    std::vector<double> distances;
+    distances.reserve(candidates.size());
+    for (const auto& c : candidates) {
+        distances.push_back(ComputePointToPointDistance(c.position, predicted));
+    }
+    const auto match = PickUniqueNearest(
+        distances,
+        [&candidates](std::size_t i, std::size_t j) {
+            return ComputePointToPointDistance(candidates[i].position, candidates[j].position) <=
+                   kSameFeatureToleranceMm;
+        },
+        radius);
+    if (!match.index) {
+        throw std::runtime_error(AnchorLabel(anchor) + ": " + match.error);
+    }
+    return candidates[*match.index];
+}
+
+// 클릭 좌표 기준 평면 고르기 - 무한 평면이 아니라 실제 면(faceBox)까지의 거리로 고르고, 클릭한
+// 면의 법선(부호 포함)과 같은 방향인 면만 본다(판재 앞/뒷면 구분). 같은 평면 위에 나뉜 면들은
+// 어느 것을 골라도 거리 계산이 같으므로 하나로 취급한다.
+geometry::PlaneCandidate MatchPlaneByRef(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
+                                         const RefGeometry& ref, std::vector<geometry::PlaneCandidate> planes,
+                                         const std::string& label) {
+    const geometry::BoundingBox targetBox = adapter.GetBoundingBox(handle);
+    const geometry::Vec3 predicted = PredictPosition(ref.position, ref.sourceBox, targetBox);
+    const double cosTolerance = CosOfDeg(kNormalMatchToleranceDeg);
+    if (ref.normal.has_value()) {
+        planes.erase(std::remove_if(planes.begin(), planes.end(),
+                                    [&](const geometry::PlaneCandidate& p) {
+                                        return CosBetween(p.normal, *ref.normal) < cosTolerance;
+                                    }),
+                     planes.end());
+    }
+    std::vector<double> distances;
+    distances.reserve(planes.size());
+    for (const auto& p : planes) {
+        distances.push_back(p.hasFaceBox ? DistanceToBox(predicted, p.faceBox)
+                                         : ComputePointToPlaneDistance(predicted, p.pointOnPlane, p.normal));
+    }
+    const auto match = PickUniqueNearest(
+        distances,
+        [&planes, cosTolerance](std::size_t i, std::size_t j) {
+            return CosBetween(planes[i].normal, planes[j].normal) >= cosTolerance &&
+                   ComputePointToPlaneDistance(planes[j].pointOnPlane, planes[i].pointOnPlane, planes[i].normal) <=
+                       kSameFeatureToleranceMm;
+        },
+        MatchRadiusMm(targetBox));
+    if (!match.index) {
+        throw std::runtime_error(label + ": " + match.error);
+    }
+    return planes[*match.index];
+}
+
+// anchor 하나를 확정한다(point_to_plane의 점 등). 클릭 좌표가 있으면 매칭, 없으면 예전 selector 방식.
+geometry::AnchorCandidate ResolveAnchor(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
+                                        const Anchor& anchor, const std::vector<std::string>& selectors) {
+    if (anchor.ref.has_value()) {
+        return MatchAnchorByRef(adapter, handle, anchor);
+    }
+    if (PointSubKindFromAnchorType(anchor.anchorType) != geometry::PointSubKind::None &&
+        !anchor.patchDescriptor.has_value()) {
+        throw std::runtime_error(AnchorLabel(anchor) +
+                                 ": 클릭 좌표가 없는 예전 규칙 - 규칙 관리에서 포인트를 다시 지정하세요");
+    }
+    const auto candidates = ApplyAnchorFilters(ResolveAnchorCandidates(adapter, handle, anchor), anchor);
+    const auto resolved = ResolveSingleAnchor(candidates, selectors);
+    if (!resolved) {
+        throw std::runtime_error(AnchorLabel(anchor) + ": 후보를 하나로 정할 수 없음 (후보 " +
+                                 std::to_string(candidates.size()) + "개)");
+    }
+    return *resolved;
+}
+
+std::pair<geometry::AnchorCandidate, geometry::AnchorCandidate> ResolveAnchorPairForRule(
+    const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, const Rule& rule) {
+    const Anchor& anchorA = rule.anchors[0];
+    const Anchor& anchorB = rule.anchors[1];
+    if (anchorA.ref.has_value() && anchorB.ref.has_value()) {
+        return {MatchAnchorByRef(adapter, handle, anchorA), MatchAnchorByRef(adapter, handle, anchorB)};
+    }
+    if (anchorA.ref.has_value() || anchorB.ref.has_value()) {
+        // 한쪽만 클릭 좌표가 있으면(예: 클릭 점 + 이름 있는 프리셋) 그쪽을 먼저 확정하고,
+        // 나머지는 selector로 - nearest_pair면 확정된 점에 가장 가까운 후보를 고른다.
+        const bool aHasRef = anchorA.ref.has_value();
+        const Anchor& fixedAnchor = aHasRef ? anchorA : anchorB;
+        const Anchor& otherAnchor = aHasRef ? anchorB : anchorA;
+        const auto fixed = MatchAnchorByRef(adapter, handle, fixedAnchor);
+        const auto otherCandidates =
+            ApplyAnchorFilters(ResolveAnchorCandidates(adapter, handle, otherAnchor), otherAnchor);
+        auto other = ResolveSingleAnchor(otherCandidates, rule.selector);
+        if (!other && std::find(rule.selector.begin(), rule.selector.end(), "nearest_pair") != rule.selector.end()) {
+            const auto pair = SelectNearestPair({fixed}, otherCandidates);
+            if (pair) {
+                other = pair->second;
+            }
+        }
+        if (!other) {
+            throw std::runtime_error(AnchorLabel(otherAnchor) + ": 후보를 하나로 정할 수 없음 (후보 " +
+                                     std::to_string(otherCandidates.size()) + "개)");
+        }
+        return aHasRef ? std::make_pair(fixed, *other) : std::make_pair(*other, fixed);
+    }
+    for (const Anchor* anchor : {&anchorA, &anchorB}) {
+        if (PointSubKindFromAnchorType(anchor->anchorType) != geometry::PointSubKind::None &&
+            !anchor->patchDescriptor.has_value()) {
+            throw std::runtime_error(AnchorLabel(*anchor) +
+                                     ": 클릭 좌표가 없는 예전 규칙 - 규칙 관리에서 포인트를 다시 지정하세요");
+        }
+    }
+    auto candidatesA = ApplyAnchorFilters(ResolveAnchorCandidates(adapter, handle, anchorA), anchorA);
+    auto candidatesB = ApplyAnchorFilters(ResolveAnchorCandidates(adapter, handle, anchorB), anchorB);
+    const auto pair = ResolvePairAnchors(candidatesA, candidatesB, rule.selector);
+    if (!pair) {
+        throw std::runtime_error("두 포인트를 하나로 정할 수 없음 (후보 A " + std::to_string(candidatesA.size()) +
+                                 "개, B " + std::to_string(candidatesB.size()) + "개)");
+    }
+    return *pair;
+}
+
 std::optional<std::pair<geometry::FaceCandidate, geometry::FaceCandidate>> ResolveFacePair(
     const std::vector<geometry::FaceCandidate>& candidatesA,
     const std::vector<geometry::FaceCandidate>& candidatesB,
@@ -131,48 +323,65 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
         case MeasurementType::PointToPoint:
         case MeasurementType::AxisProjection: {
             if (rule.anchors.size() != 2) {
-                throw std::runtime_error(rule.name + ": point_to_point/axis_projection needs 2 anchors");
+                throw std::runtime_error("point_to_point/axis_projection은 포인트 2개가 필요함");
             }
-            auto candidatesA = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
-            auto candidatesB = ResolveAnchorCandidates(adapter, handle, rule.anchors[1]);
-            candidatesA = ApplyAnchorFilters(std::move(candidatesA), rule.anchors[0]);
-            candidatesB = ApplyAnchorFilters(std::move(candidatesB), rule.anchors[1]);
-            const auto pair = ResolvePairAnchors(candidatesA, candidatesB, rule.selector);
-            if (!pair) {
-                throw std::runtime_error(rule.name + ": failed to resolve anchor pair (ambiguous candidates)");
-            }
+            const auto pair = ResolveAnchorPairForRule(adapter, handle, rule);
             return rule.measurementType == MeasurementType::PointToPoint
-                       ? ComputePointToPointDistance(pair->first.position, pair->second.position)
-                       : ComputeAxisProjectionDistance(pair->first.position, pair->second.position, rule.projection);
+                       ? ComputePointToPointDistance(pair.first.position, pair.second.position)
+                       : ComputeAxisProjectionDistance(pair.first.position, pair.second.position, rule.projection);
         }
         case MeasurementType::PointToPlane: {
             if (rule.anchors.size() != 1 || !rule.referencePlane.has_value()) {
-                throw std::runtime_error(rule.name + ": point_to_plane needs 1 anchor + referencePlane");
+                throw std::runtime_error("point_to_plane은 포인트 1개 + 기준 평면이 필요함");
             }
-            auto candidates = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
-            candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
-            const auto resolved = ResolveSingleAnchor(candidates, rule.selector);
-            if (!resolved) {
-                throw std::runtime_error(rule.name + ": failed to resolve anchor (ambiguous candidates)");
-            }
+            const auto resolved = ResolveAnchor(adapter, handle, rule.anchors[0], rule.selector);
             auto planes = adapter.FindPlaneCandidates(
                 handle, rule.referencePlane->planeType, rule.referencePlane->partName);
             planes = FilterPlanesByNormal(
                 std::move(planes), rule.referencePlane->normalAxis, rule.referencePlane->normalToleranceDeg);
-            if (planes.empty()) {
-                throw std::runtime_error(rule.name + ": no plane candidate found");
+            geometry::PlaneCandidate plane;
+            if (rule.referencePlane->ref.has_value()) {
+                plane = MatchPlaneByRef(adapter, handle, *rule.referencePlane->ref, std::move(planes), "기준 평면");
+            } else {
+                // 예전 규칙(클릭 좌표 없음) - 어느 평면인지 알 방법이 없어 첫 후보를 쓴다.
+                if (planes.empty()) {
+                    throw std::runtime_error("기준 평면 후보 없음");
+                }
+                plane = planes.front();
             }
-            return ComputePointToPlaneDistance(resolved->position, planes.front().pointOnPlane, planes.front().normal);
+            return ComputePointToPlaneDistance(resolved.position, plane.pointOnPlane, plane.normal);
         }
         case MeasurementType::FaceToFaceGap: {
             if (rule.anchors.size() != 2) {
-                throw std::runtime_error(rule.name + ": face_to_face_gap needs 2 anchors (face refs)");
+                throw std::runtime_error("face_to_face_gap은 면 2개가 필요함");
             }
-            const auto facesA = adapter.FindFaceCandidates(handle, rule.anchors[0].anchorType, rule.anchors[0].partName);
-            const auto facesB = adapter.FindFaceCandidates(handle, rule.anchors[1].anchorType, rule.anchors[1].partName);
+            const Anchor& anchorA = rule.anchors[0];
+            const Anchor& anchorB = rule.anchors[1];
+            if (anchorA.ref.has_value() || anchorB.ref.has_value()) {
+                // § 측정 재점검(2026-10-30) - 클릭한 두 평면을 각각 그 자리에서 고른다. 예전엔
+                // A/B 후보 목록이 똑같이 "모델의 모든 면"이라 한 면이 자기 자신과 짝지어질 수도
+                // 있었다.
+                if (!anchorA.ref || !anchorB.ref || !anchorA.ref->normal || !anchorB.ref->normal) {
+                    throw std::runtime_error("face_to_face_gap은 평면 두 개를 클릭해야 함");
+                }
+                const auto planes = adapter.FindPlaneCandidates(handle, "Datum_Plane", std::string());
+                const auto planeA = MatchPlaneByRef(adapter, handle, *anchorA.ref, planes, "면 A");
+                const auto planeB = MatchPlaneByRef(adapter, handle, *anchorB.ref, planes, "면 B");
+                const double cosAngle = std::abs(CosBetween(planeA.normal, planeB.normal));
+                if (cosAngle < CosOfDeg(kParallelFaceToleranceDeg)) {
+                    throw std::runtime_error("두 면이 평행하지 않음 - 평행하지 않은 면 사이 최단거리는 아직 미지원");
+                }
+                const double gap = ComputePointToPlaneDistance(planeB.pointOnPlane, planeA.pointOnPlane, planeA.normal);
+                if (gap <= kSameFeatureToleranceMm) {
+                    throw std::runtime_error("면 A와 면 B가 같은 평면으로 매칭됨");
+                }
+                return gap;
+            }
+            const auto facesA = adapter.FindFaceCandidates(handle, anchorA.anchorType, anchorA.partName);
+            const auto facesB = adapter.FindFaceCandidates(handle, anchorB.anchorType, anchorB.partName);
             const auto pair = ResolveFacePair(facesA, facesB, rule.selector);
             if (!pair) {
-                throw std::runtime_error(rule.name + ": failed to resolve face pair (ambiguous or no anti-parallel match)");
+                throw std::runtime_error("면 쌍을 하나로 정할 수 없음 (애매하거나 마주보는 면 없음)");
             }
             return ComputeFaceToFaceGap(pair->first, pair->second);
         }
@@ -182,11 +391,11 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
             if (rule.projection == "X") return box.max.x - box.min.x;
             if (rule.projection == "Y") return box.max.y - box.min.y;
             if (rule.projection == "Z") return box.max.z - box.min.z;
-            throw std::runtime_error(rule.name + ": overall_size requires projection X/Y/Z, got: " + rule.projection);
+            throw std::runtime_error("overall_size는 projection X/Y/Z가 필요함 (현재: " + rule.projection + ")");
         }
         case MeasurementType::InstanceCount: {
             if (rule.anchors.size() != 1) {
-                throw std::runtime_error(rule.name + ": instance_count needs 1 anchor");
+                throw std::runtime_error("instance_count는 포인트 1개가 필요함");
             }
             auto candidates = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
             candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
@@ -194,35 +403,27 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
         }
         case MeasurementType::MinPitch: {
             if (rule.anchors.size() != 1) {
-                throw std::runtime_error(rule.name + ": min_pitch needs 1 anchor");
+                throw std::runtime_error("min_pitch는 포인트 1개가 필요함");
             }
             auto candidates = ResolveAnchorCandidates(adapter, handle, rule.anchors[0]);
             candidates = ApplyAnchorFilters(std::move(candidates), rule.anchors[0]);
             if (candidates.size() < 2) {
                 throw std::runtime_error(
-                    rule.name + ": min_pitch needs at least 2 matching candidates (found " +
-                    std::to_string(candidates.size()) + ")");
+                    "min_pitch는 조건에 맞는 후보가 2개 이상 필요함 (찾은 개수 " + std::to_string(candidates.size()) + ")");
             }
-            // projection을 정렬 축(X/Y/Z)으로 재사용 - 비어있으면 X를 기본값으로 쓴다.
-            const std::string& axis = rule.projection;
-            auto axisValue = [&axis](const geometry::Vec3& p) {
-                if (axis == "Y") return p.y;
-                if (axis == "Z") return p.z;
-                return p.x;
-            };
-            std::sort(candidates.begin(), candidates.end(),
-                      [&axisValue](const geometry::AnchorCandidate& a, const geometry::AnchorCandidate& b) {
-                          return axisValue(a.position) < axisValue(b.position);
-                      });
+            // § 측정 재점검(2026-10-30) - 예전엔 projection 축으로 정렬한 뒤 "바로 옆" 후보끼리만
+            // 거리를 재서, 정렬 축과 다른 방향으로 더 가까운 쌍을 놓쳤다. 모든 쌍의 최솟값을 쓴다.
             double minGap = std::numeric_limits<double>::max();
-            for (size_t i = 1; i < candidates.size(); ++i) {
-                minGap = std::min(
-                    minGap, ComputePointToPointDistance(candidates[i - 1].position, candidates[i].position));
+            for (size_t i = 0; i < candidates.size(); ++i) {
+                for (size_t j = i + 1; j < candidates.size(); ++j) {
+                    minGap = std::min(
+                        minGap, ComputePointToPointDistance(candidates[i].position, candidates[j].position));
+                }
             }
             return minGap;
         }
     }
-    throw std::runtime_error(rule.name + ": unknown measurement type");
+    throw std::runtime_error("알 수 없는 측정 타입");
 }
 
 } // namespace
@@ -235,24 +436,53 @@ std::vector<InchResult> RuleEngine::Evaluate(
     std::optional<double> baseline;
 
     for (const auto& [inch, handle] : handlesByInch) {
-        const double value = EvaluateSingleModel(adapter, handle, rule);
-        if (!baseline.has_value()) {
-            baseline = value;
-        }
-
         InchResult result;
         result.inch = inch;
-        result.value = value;
-        result.deltaFromBaseline = value - *baseline;
-        // 전장 사이즈는 인치마다 다른 게 정상(설계 의도)이라 공차 판정 자체가 의미 없음 -
-        // 값/편차는 그대로 보여주되 pass/fail 표시는 하지 않는다.
-        result.withinTolerance = rule.measurementType == MeasurementType::OverallSize
-            ? true
-            : (result.deltaFromBaseline <= rule.tolerancePlusMm && result.deltaFromBaseline >= -rule.toleranceMinusMm);
-        results.push_back(result);
+        try {
+            result.value = EvaluateSingleModel(adapter, handle, rule);
+        } catch (const std::exception& e) {
+            result.ok = false;
+            result.error = e.what();
+            results.push_back(std::move(result));
+            continue;
+        }
+        if (!baseline.has_value()) {
+            baseline = result.value;
+        }
+        result.deltaFromBaseline = result.value - *baseline;
+
+        const auto specIt = rule.specByInch.find(inch);
+        if (specIt != rule.specByInch.end()) {
+            result.spec = specIt->second;
+            result.deviation = result.value - specIt->second;
+            result.withinTolerance =
+                result.deviation <= rule.tolerancePlusMm && result.deviation >= -rule.toleranceMinusMm;
+        } else {
+            result.deviation = result.deltaFromBaseline;
+            // 전장 사이즈는 인치마다 다른 게 정상(설계 의도)이라 도면 스펙 없이는 공차 판정 자체가
+            // 의미 없음 - 값/편차는 그대로 보여주되 pass/fail 표시는 하지 않는다.
+            result.withinTolerance = rule.measurementType == MeasurementType::OverallSize
+                ? true
+                : (result.deltaFromBaseline <= rule.tolerancePlusMm &&
+                   result.deltaFromBaseline >= -rule.toleranceMinusMm);
+        }
+        results.push_back(std::move(result));
     }
 
     return results;
+}
+
+std::optional<geometry::Vec3> RuleEngine::ResolveAnchorPosition(
+    const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, const Anchor& anchor,
+    std::string* error) {
+    try {
+        return ResolveAnchor(adapter, handle, anchor, {}).position;
+    } catch (const std::exception& e) {
+        if (error) {
+            *error = e.what();
+        }
+        return std::nullopt;
+    }
 }
 
 } // namespace rule

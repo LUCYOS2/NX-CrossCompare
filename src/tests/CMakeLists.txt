@@ -17,3 +17,7 @@ target_link_libraries(diag_feature_patch PRIVATE geometry)
 
 add_executable(diag_shape_preset_pipeline diag_shape_preset_pipeline.cpp)
 target_link_libraries(diag_shape_preset_pipeline PRIVATE geometry rule database)
+
+# § 측정 매칭 진단(2026-10-30) - 실제 STEP으로 클릭 좌표 매칭의 정답/실패/오답 개수를 센다.
+add_executable(diag_measure_matching diag_measure_matching.cpp)
+target_link_libraries(diag_measure_matching PRIVATE geometry rule)

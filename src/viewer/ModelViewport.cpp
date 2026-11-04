@@ -27,6 +27,11 @@ namespace {
 // 같은 화면 크기 기준을 써야 해서 파일 스코프 상수로 공유한다.
 constexpr float kHalfFovTan = 0.41421356f;
 
+// § 드래그 영역 다중 선택(2026-09-23) - 눌렀다 뗀 지점 사이 거리가 이 픽셀보다 작으면
+// "클릭"(면 하나), 넘으면 "드래그"(사각형 안의 면 전부)로 본다. 손떨림으로 오인 안
+// 되게 넉넉히 잡는다.
+constexpr int kPickDragThresholdPx = 6;
+
 // § 정투상(orthographic) 전환(2026-09-13) - "FRONT/TOP 같은 축 정렬 뷰인데도 면이
 // 비스듬하게 보인다"는 리포트. 원근(perspective) 투영은 카메라 시점(eye)에서 갈라지는
 // 광선 때문에 화면 중심이 아닌 곳은 축 정렬 뷰라도 옆면이 살짝 비쳐 보인다 - 실제 CAD
@@ -40,6 +45,27 @@ QMatrix4x4 BuildProjectionMatrix(float distance, float aspect) {
     QMatrix4x4 projection;
     projection.ortho(-halfWidth, halfWidth, -halfHeight, halfHeight, 1.0f, 20000.0f);
     return projection;
+}
+
+// § 드래그 영역 다중 선택(2026-09-29) - "면 일부만 걸쳐도 잡힌다" 수정에 쓰는 월드->화면
+// 역변환. ComputeRayForView(화면->월드 광선)의 정반대 방향 - 같은 투영/뷰 행렬 관례를
+// 공유해야 해서 옆에 둔다. 카메라 뒤(w<=0)면 false.
+bool WorldToScreen(const Camera& camera, int viewportWidth, int viewportHeight, const QVector3D& worldPoint,
+                    QPointF& outScreenPos) {
+    if (viewportWidth <= 0 || viewportHeight <= 0) {
+        return false;
+    }
+    const float aspect = static_cast<float>(viewportWidth) / static_cast<float>(viewportHeight);
+    const QMatrix4x4 viewProj = BuildProjectionMatrix(camera.distance, aspect) * camera.ViewMatrix();
+    const QVector4D clip = viewProj * QVector4D(worldPoint, 1.0f);
+    if (qFuzzyIsNull(clip.w()) || clip.w() < 0.0f) {
+        return false;
+    }
+    const QVector3D ndc = clip.toVector3D() / clip.w();
+    outScreenPos = QPointF(
+        (ndc.x() * 0.5f + 0.5f) * static_cast<float>(viewportWidth),
+        (1.0f - (ndc.y() * 0.5f + 0.5f)) * static_cast<float>(viewportHeight));
+    return true;
 }
 
 // Solid shaded + edge overlay (NX 경량화 표시 스타일 목표, 개발계획_v2.md §17).
@@ -222,6 +248,7 @@ ModelViewport::~ModelViewport() {
     hoverVbo_.destroy();
     hoverFaceVbo_.destroy();
     hoverEdgeVbo_.destroy();
+    capturedFaceVbo_.destroy();
     lineVbo_.destroy();
     arrowVbo_.destroy();
     extLineVbo_.destroy();
@@ -338,6 +365,17 @@ void ModelViewport::initializeGL() {
     hoverEdgeVao_.release();
     hoverEdgeVbo_.release();
 
+    // § 형상 프리셋 캡처 하이라이트 VAO/VBO - SetCapturedPatchHighlight()가 채운다
+    // (hoverFaceVao_와 같은 구조, 매 프레임이 아니라 캡처될 때만 갱신됨).
+    capturedFaceVao_.create();
+    capturedFaceVao_.bind();
+    capturedFaceVbo_.create();
+    capturedFaceVbo_.bind();
+    program_.enableAttributeArray(0);
+    program_.setAttributeBuffer(0, GL_FLOAT, 0, 3);
+    capturedFaceVao_.release();
+    capturedFaceVbo_.release();
+
     // § CTQ 치수선용 VAO/VBO - 정점 데이터는 SetDimensionLine()이 바뀔 때마다 채운다.
     lineVao_.create();
     lineVao_.bind();
@@ -392,6 +430,34 @@ void ModelViewport::SetMarkerPositions(const std::vector<QVector3D>& worldPositi
     markerVbo_.bind();
     markerVbo_.allocate(data.data(), static_cast<int>(data.size() * sizeof(float)));
     markerVbo_.release();
+    doneCurrent();
+    update();
+}
+
+void ModelViewport::SetCapturedPatchHighlight(const std::vector<geometry::Vec3>& worldTriangles) {
+    capturedFaceTriangles_.clear();
+    capturedFaceTriangles_.reserve(worldTriangles.size());
+    for (const auto& v : worldTriangles) {
+        capturedFaceTriangles_.emplace_back(static_cast<float>(v.x), static_cast<float>(v.y),
+                                             static_cast<float>(v.z));
+    }
+    makeCurrent();
+    std::vector<float> data;
+    data.reserve(capturedFaceTriangles_.size() * 3);
+    for (const auto& v : capturedFaceTriangles_) {
+        data.push_back(v.x());
+        data.push_back(v.y());
+        data.push_back(v.z());
+    }
+    capturedFaceVbo_.bind();
+    // 빈 벡터를 allocate(nullptr, 0)하면 드라이버에 따라 미정의 동작이 될 수 있어, 최소
+    // 1개 float 자리는 항상 확보해둔다(draw 호출 자체는 count==0일 때 아무것도 안 그림).
+    if (data.empty()) {
+        capturedFaceVbo_.allocate(3 * static_cast<int>(sizeof(float)));
+    } else {
+        capturedFaceVbo_.allocate(data.data(), static_cast<int>(data.size() * sizeof(float)));
+    }
+    capturedFaceVbo_.release();
     doneCurrent();
     update();
 }
@@ -788,6 +854,24 @@ void ModelViewport::paintGL() {
         }
     }
 
+    // § 형상 프리셋 캡처 하이라이트 - 위 hoverFaceTriangles_ 블록과 달리 pickModeActive_
+    // 여부/마우스 위치와 무관하게 항상 그린다(피킹 모드를 꺼도 "이게 캡처된 형상이다"가
+    // 계속 보여야 함). 색을 초록으로 구분해서 "지금 마우스가 가리키는 것"(주황)과
+    // "이미 확정된 캡처"(초록)를 헷갈리지 않게 한다.
+    if (!capturedFaceTriangles_.empty()) {
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_BLEND);
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        program_.setUniformValue("isHoverFacePass", true);
+        program_.setUniformValue("markerColor", QVector3D(0.15f, 0.85f, 0.25f)); // 초록
+        capturedFaceVao_.bind();
+        glDrawArrays(GL_TRIANGLES, 0, static_cast<int>(capturedFaceTriangles_.size()));
+        capturedFaceVao_.release();
+        program_.setUniformValue("isHoverFacePass", false);
+        glDisable(GL_BLEND);
+        glEnable(GL_DEPTH_TEST);
+    }
+
     vao_.release();
     program_.release();
 
@@ -923,12 +1007,13 @@ void ModelViewport::mousePressEvent(QMouseEvent* event) {
     // § 3D 클릭 피킹 - 피킹 모드 중이면 좌클릭이 회전을 시작하지 않고 광선만 쏜다.
     // 정밀하게 면을 짚어야 하는데 살짝 흔들려도 회전이 같이 걸리면 방해가 되므로,
     // 피킹 모드 동안은 좌클릭 회전을 완전히 잠근다(mouseMoveEvent에서도 동일하게 체크).
+    // § 드래그 영역 다중 선택(2026-09-23) - "프리셋 형상을 드래그로도 인식하게 해달라"는
+    // 요청. 눌렀을 때 바로 광선을 쏘지 않고, 뗄 때(mouseReleaseEvent) 드래그였는지 단순
+    // 클릭이었는지로 갈라 처리한다 - 이래야 "클릭=면 하나, 드래그=사각형 안의 면 전부"를
+    // 같은 피킹 모드 안에서 자연스럽게 구분할 수 있다.
     if (pickModeActive_ && *pickModeActive_ && event->button() == Qt::LeftButton) {
-        QVector3D rayOrigin;
-        QVector3D rayDir;
-        if (computeSectionRay(rayOrigin, rayDir)) {
-            emit facePicked(handle_, rayOrigin, rayDir);
-        }
+        pickDragStart_ = event->pos();
+        pickDragActive_ = true;
         return;
     }
 
@@ -971,13 +1056,29 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
     // 마우스 매핑: 좌클릭=회전, 우클릭=팬, 중클릭=단면 위치 지정, 휠=줌(wheelEvent).
     // 독립 조작 모드(§ 화면설정)면 sharedCamera_가 아니라 이 뷰포트의 localCamera_만 바뀐다.
     if (pickModeActive_ && *pickModeActive_) {
+        // § 드래그 영역 다중 선택(2026-09-23) - "일반 드래그로 뷰 회전이 안 된다"는
+        // 리포트 수정. 처음엔 regionSelectModeActive_ 중 아무 좌클릭 드래그나 사각형
+        // 선택으로 가로챘는데, 그러면 그 모드에서는 회전이 아예 불가능해졌다. 이제
+        // Ctrl을 같이 눌렀을 때만 드래그가 사각형 선택으로 바뀌고, 그냥 드래그는
+        // (regionSelectModeActive_든 아니든) 항상 예전처럼 회전/팬으로 이어받는다.
+        if (pickDragActive_ && (event->pos() - pickDragStart_).manhattanLength() > kPickDragThresholdPx) {
+            pickDidDrag_ = true;
+        }
+        if (pickDidDrag_ && regionSelectModeActive_ && *regionSelectModeActive_ &&
+            (event->modifiers() & Qt::ControlModifier) && (event->buttons() & Qt::LeftButton)) {
+            if (!pickRegionRubberBand_) {
+                pickRegionRubberBand_ = new QRubberBand(QRubberBand::Rectangle, this);
+            }
+            pickRegionRubberBand_->setGeometry(QRect(pickDragStart_, event->pos()).normalized());
+            pickRegionRubberBand_->show();
+            return;
+        }
         // § 피킹 모드 중 뷰어 조작 허용(2026-09-13) - "측정 부위를 지정할 때도 화면
-        // 뷰어를 마우스로 조작할 수 있게 해달라"는 요청. 예전엔 피킹 모드 동안 좌클릭
-        // 드래그가 완전히 막혀 있어서(정밀 클릭 방해 방지 의도) 찍기 전에 각도를 다시
-        // 잡고 싶어도 피킹을 잠깐 꺼야 했다. 좌클릭 피킹 자체는 mousePressEvent에서
-        // "누르는 순간" 이미 끝나므로, 그 뒤 버튼을 유지한 채 드래그가 이어지면 회전/팬
-        // 으로 이어받아도 피킹 결과와는 충돌하지 않는다 - 휠 줌은 원래도 피킹 모드와
-        // 무관하게 항상 동작했다(wheelEvent). 카메라 잠금 중이면 기존처럼 무시.
+        // 뷰어를 마우스로 조작할 수 있게 해달라"는 요청. 좌클릭 피킹은 이제 뗄 때
+        // (mouseReleaseEvent)까지 확정을 미루므로(드래그 영역 선택과 구분하기 위해),
+        // 그 사이 버튼을 유지한 채 이동해도 여기서 회전/팬으로 이어받는다 - regionSelect
+        // 모드가 아니면(일반 "지정..." 흐름) 예전과 동일하게 동작. 휠 줌은 원래도 피킹
+        // 모드와 무관하게 항상 동작했다(wheelEvent). 카메라 잠금 중이면 기존처럼 무시.
         if (!(cameraLockedPtr_ && *cameraLockedPtr_) && (event->buttons() & (Qt::LeftButton | Qt::RightButton))) {
             Camera* transform = ActiveTransform();
             if (event->buttons() & Qt::LeftButton) {
@@ -1087,6 +1188,66 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
 }
 
 void ModelViewport::mouseReleaseEvent(QMouseEvent* event) {
+    // § 드래그 영역 다중 선택(2026-09-23) - 피킹 모드 중 좌클릭을 뗀 순간, 눌렀을 때부터
+    // 임계값을 넘게 움직였는지(pickDidDrag_)로 "클릭"과 "드래그"를 가른다. Ctrl 없이
+    // 드래그했다면(=순수 회전/팬) mouseMoveEvent가 rubberBand를 보여준 적이 없으므로
+    // isVisible()이 false라 아무것도 안 낸다(예전 "피킹 모드 중 뷰 회전" 동작 그대로
+    // 보존 - pickRegionRubberBand_ 포인터 자체는 최초 생성 이후 계속 살아있어(lazy
+    // 생성, show/hide만 반복) null 체크만으로는 이번 드래그가 Ctrl+드래그였는지 구분이
+    // 안 된다, 반드시 isVisible()까지 봐야 함). Ctrl+드래그였다면 사각형 다중 선택으로,
+    // 드래그가 아니었다면(순수 클릭) 기존 단일 피킹으로 나간다.
+    if (pickModeActive_ && *pickModeActive_ && event->button() == Qt::LeftButton && pickDragActive_) {
+        pickDragActive_ = false;
+        const bool didDrag = pickDidDrag_;
+        pickDidDrag_ = false;
+        if (didDrag) {
+            if (pickRegionRubberBand_ && pickRegionRubberBand_->isVisible()) {
+                const QRect region = pickRegionRubberBand_->geometry();
+                pickRegionRubberBand_->hide();
+                if (region.width() >= 4 && region.height() >= 4) {
+                    // § 완전 포함만 선택(2026-09-29) - "면의 일부만 사각형에 걸쳐도 전체가
+                    // 잡힌다"는 피드백 수정. 예전엔 사각형 안을 격자로 샘플링해 광선이 닿는
+                    // 면을 모았는데, 그러면 면의 한쪽 모서리만 사각형에 들어와도 뽑혔다.
+                    // 이제 모델의 모든 면을 순회하며 그 면의 테셀레이션 정점 전체를 화면
+                    // 좌표로 투영해서, 정점이 하나라도 사각형 밖에 있으면(또는 카메라 뒤라
+                    // 투영이 안 되면) 그 면은 제외한다 - 완전히 안에 들어온 면만 선택된다.
+                    std::vector<int> faceIndices;
+                    const int faceCount = adapter_->GetFaceCount(handle_);
+                    for (int faceIndex = 0; faceIndex < faceCount; ++faceIndex) {
+                        const auto triangles = adapter_->GetFaceHighlightTriangles(handle_, faceIndex);
+                        if (triangles.empty()) {
+                            continue;
+                        }
+                        bool fullyInside = true;
+                        for (const auto& v : triangles) {
+                            QPointF screenPos;
+                            if (!WorldToScreen(*ActiveTransform(), width(), height(),
+                                                QVector3D(static_cast<float>(v.x), static_cast<float>(v.y),
+                                                          static_cast<float>(v.z)),
+                                                screenPos) ||
+                                !region.contains(screenPos.toPoint())) {
+                                fullyInside = false;
+                                break;
+                            }
+                        }
+                        if (fullyInside) {
+                            faceIndices.push_back(faceIndex);
+                        }
+                    }
+                    emit facesInRegionPicked(handle_, faceIndices, event->modifiers() & Qt::ShiftModifier);
+                }
+            }
+            return;
+        }
+        lastMousePos_ = event->pos();
+        QVector3D rayOrigin;
+        QVector3D rayDir;
+        if (computeSectionRay(rayOrigin, rayDir)) {
+            emit facePicked(handle_, rayOrigin, rayDir, event->modifiers() & Qt::ShiftModifier);
+        }
+        return;
+    }
+
     // § 치수선 드래그 - 버튼을 떼면 드래그 종료.
     if (event->button() == Qt::LeftButton && draggingDimensionOffset_) {
         draggingDimensionOffset_ = false;

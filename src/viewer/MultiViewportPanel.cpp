@@ -89,6 +89,7 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
         viewport->SetIndependentModePtr(&independentMode_);
         viewport->SetPickModePtr(&pickModeActive_);
         viewport->SetCaptureRegionModePtr(&captureRegionModeActive_);
+        viewport->SetRegionSelectModePtr(&regionSelectModeActive_);
         viewport->SetCameraLockedPtr(&cameraLocked_);
         viewports_.push_back(viewport);
 
@@ -111,6 +112,8 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
         });
         // § 3D 클릭 피킹 - 어느 뷰포트에서 찍었든 패널의 facePicked 하나로 모아서 내보낸다.
         connect(viewport, &ModelViewport::facePicked, this, &MultiViewportPanel::facePicked);
+        // § 드래그 영역 다중 선택 - 마찬가지로 패널의 facesInRegionPicked 하나로 모은다.
+        connect(viewport, &ModelViewport::facesInRegionPicked, this, &MultiViewportPanel::facesInRegionPicked);
         // § 캡쳐 영역 드래그 지정 - 마찬가지로 패널의 captureRegionGrabbed 하나로 모은다.
         connect(viewport, &ModelViewport::captureRegionGrabbed, this, &MultiViewportPanel::captureRegionGrabbed);
         // § 치수선 드래그 - 마찬가지로 패널의 dimensionOffsetDragged 하나로 모은다.
@@ -594,6 +597,10 @@ void MultiViewportPanel::setPickModeActive(bool active) {
     pickModeActive_ = active;
 }
 
+void MultiViewportPanel::setRegionSelectModeActive(bool active) {
+    regionSelectModeActive_ = active;
+}
+
 QPixmap MultiViewportPanel::grabActiveViewport() {
     if (!hoveredViewport_) {
         return QPixmap();
@@ -612,6 +619,12 @@ void MultiViewportPanel::setCameraLocked(bool locked) {
 void MultiViewportPanel::SetMarkerPositions(const std::vector<QVector3D>& worldPositions) {
     for (auto* vp : viewports_) {
         vp->SetMarkerPositions(worldPositions);
+    }
+}
+
+void MultiViewportPanel::SetCapturedPatchHighlight(const std::vector<geometry::Vec3>& worldTriangles) {
+    for (auto* vp : viewports_) {
+        vp->SetCapturedPatchHighlight(worldTriangles);
     }
 }
 

@@ -7,6 +7,8 @@ add_library(rule STATIC
     SyntheticFixture.cpp
     Selector.h
     Selector.cpp
+    Matching.h
+    Matching.cpp
     RuleEngine.h
     RuleEngine.cpp
     BuiltInCatalog.h

@@ -3,6 +3,7 @@
 #include "geometry/IGeometryAdapter.h"
 #include "rule/Rule.h"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -62,6 +63,9 @@ public:
     void DeleteShapePreset(int presetId);
 
 private:
+    void InsertAnchors(int ruleId, const std::vector<rule::Anchor>& anchors);
+    void InsertSpecs(int ruleId, const std::map<int, double>& specByInch);
+
     sqlite3* db_ = nullptr;
 };
 

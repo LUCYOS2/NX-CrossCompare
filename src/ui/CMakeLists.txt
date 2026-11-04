@@ -5,8 +5,6 @@ add_library(ui STATIC
     RuleEditorDialog.cpp
     ImportInchDialog.h
     ImportInchDialog.cpp
-    AnchorSearchDialog.h
-    AnchorSearchDialog.cpp
     ShapePresetDialog.h
     ShapePresetDialog.cpp
 )

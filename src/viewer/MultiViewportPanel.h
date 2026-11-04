@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QPixmap>
+#include <QRect>
 #include <QVector3D>
 #include <QWidget>
 
@@ -41,6 +42,12 @@ public:
     // 받거나 취소하면 끈다. 켜져 있는 동안 모든 뷰포트의 좌클릭이 회전 대신 피킹으로
     // 동작한다(ModelViewport::pickModeActive_ 참고).
     void setPickModeActive(bool active);
+
+    // § 드래그 영역 다중 선택(2026-09-23) - "프리셋 형상을 드래그로도 선택하게 해달라"는
+    // 요청. pickModeActive_와 함께 켜면(ShapePresetDialog 수동 선택 모드) 좌클릭 드래그가
+    // "피킹 모드 중 뷰 회전"(기존 동작) 대신 사각형 다중 선택으로 바뀐다 - 끄면(예:
+    // RuleEditorDialog의 일반 "지정..." 흐름) 기존처럼 드래그=회전이 유지된다.
+    void setRegionSelectModeActive(bool active);
 
     // § 이미지 캡쳐 뷰어 설정(2026-09-10) - RuleEditorDialog가 측정 이미지 영역에서
     // 메인 툴바를 직접 건드리지 않고도 단면뷰 on/off만 빠르게 전환할 수 있게. 축/좌표 등
@@ -105,6 +112,9 @@ public:
     // 월드 좌표를 넘기면 로드된 모든 뷰포트(=모든 인치, §5 공통 월드좌표계 정렬 전제)에
     // 밝은 주황 점으로 표시한다.
     void SetMarkerPositions(const std::vector<QVector3D>& worldPositions);
+    // § 형상 프리셋 캡처 하이라이트 - ModelViewport::SetCapturedPatchHighlight 참고
+    // (ShapePresetDialog가 형상을 캡처하면 고정 하이라이트로 계속 보여준다).
+    void SetCapturedPatchHighlight(const std::vector<geometry::Vec3>& worldTriangles);
     // § CTQ 치수선 - 포인트 2개를 잇는 선을 모든 뷰포트에 표시한다.
     void SetDimensionLine(const std::vector<QVector3D>& worldPoints);
     // § 치수선 중앙 라벨 - Point(부위) 이니셜을 노란 박스로 치수선 중점에 표시한다.
@@ -124,7 +134,10 @@ public:
 signals:
     // 어느 뷰포트에서 찍었든 여기로 모여서 나간다 - RuleEditorDialog는 패널 하나에만
     // 연결하면 되고, 개별 ModelViewport를 알 필요가 없다.
-    void facePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir);
+    void facePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir, bool shiftHeld);
+    // § 드래그 영역 다중 선택 - setRegionSelectModeActive(true) 중 드래그로 사각형을
+    // 그리고 놓으면(어느 뷰포트에서든) 여기로 모여서 나간다 - ModelViewport::facesInRegionPicked 참고.
+    void facesInRegionPicked(geometry::ModelHandle handle, std::vector<int> faceIndices, bool shiftHeld);
     // 캡쳐 영역 드래그가 끝났을 때(어느 뷰포트에서든) 여기로 모여서 나간다 - 픽스맵 +
     // 그 순간의 CaptureInfo(이미지 위 클릭 피킹용).
     void captureRegionGrabbed(QPixmap pixmap, ModelViewport::CaptureInfo info);
@@ -173,6 +186,9 @@ private:
     // § 캡쳐 영역 드래그 지정 - setCaptureRegionModeActive()로 켜고 끄며, 각
     // ModelViewport에 포인터로 공유한다(pickModeActive_와 같은 패턴).
     bool captureRegionModeActive_ = false;
+    // § 드래그 영역 다중 선택 - setRegionSelectModeActive()로 켜고 끄며, 각
+    // ModelViewport에 포인터로 공유한다(pickModeActive_와 같은 패턴).
+    bool regionSelectModeActive_ = false;
     // § 뷰어 카메라 잠금 - setCameraLocked()로 켜고 끄며, 각 ModelViewport에 포인터로
     // 공유한다(pickModeActive_와 같은 패턴).
     bool cameraLocked_ = false;

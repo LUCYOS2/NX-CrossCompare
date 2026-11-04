@@ -45,6 +45,9 @@ private slots:
     void onImportStepClicked();
     void onCaptureImageClicked();
     void onSearchAnchorsClicked();
+    // § 불러온 파일 관리(2026-09-18) - 인치 미지정 파일까지 포함해서 불러온 파일 전부를
+    // 보여주고 개별 삭제한다(비교 테이블 헤더 클릭 삭제는 인치 미지정 항목을 못 다룸).
+    void onManageLoadedFilesClicked();
 
 private:
     void setupMenuBar();
@@ -58,6 +61,8 @@ private:
     // setupCentralViewer()와 onSearchAnchorsClicked()가 둘 다 "인치별 라벨+handle
     // 목록"이 필요해서 공유하는 헬퍼.
     std::vector<std::pair<std::string, geometry::ModelHandle>> BuildLoadedModelList() const;
+    // 인치가 지정된 모델들의 인치(오름차순) - 규칙 관리의 "도면 스펙" 표 행으로 쓴다.
+    std::vector<int> LoadedInches() const;
 
     std::unique_ptr<geometry::IGeometryAdapter> adapter_;
     database::Database db_;
@@ -80,6 +85,10 @@ private:
     QTableWidget* comparisonTable_ = nullptr;
     std::vector<report::RuleReport> lastReports_;
     std::set<std::string> hiddenRuleNames_;
+    // § 인치별 삭제(2026-09-18) - 비교 테이블의 인치 열 헤더를 클릭하면 그 인치를 목록에서
+    // 뺄 수 있다(onRuleHeaderClicked). refreshComparisonTable()이 매번 다시 채운다 -
+    // section(열 index, kFixedColumnCount 이후)과 실제 inch 값을 연결해준다.
+    std::vector<int> comparisonInchColumns_;
 
     // § 화면설정 - setupCentralViewer()가 STEP 재로드마다 새 MultiViewportPanel을 만들기
     // 때문에, 마지막으로 고른 화면 모드/조작 모드를 여기 기억해뒀다가 재로드 직후 다시

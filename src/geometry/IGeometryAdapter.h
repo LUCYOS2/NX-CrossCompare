@@ -22,6 +22,8 @@ struct BoundingBox {
 struct AnchorCandidate {
     std::string anchorType; // Hole, Boss_Center, Hook_Tip_Edge, ...
     std::string partName;   // Bezel, Rear_Chassis, ...
+    // 원통면(Hole/Boss_Center)이면 축 위에서 그 면이 차지하는 구간의 중앙점(§ 측정 재점검
+    // 2026-10-30 - 예전엔 STEP 축 기준점(축 위 아무 점)이라 실제 구멍 위치와 어긋났다).
     Vec3 position;
     // 원통면(Hole/Boss_Center) 후보의 지름(mm). 평면/edge 기반 등 원통이 아닌 타입은 0.
     // Rule의 Anchor.paramKey=="diameter"일 때 후보를 걸러내는 데 쓰인다(RuleEngine 참고) -
@@ -39,16 +41,23 @@ struct AnchorCandidate {
 };
 
 // point_to_plane 측정의 기준 평면 후보. 평면 위 한 점 + 법선벡터로 표현.
+// § 측정 재점검(2026-10-30) - normal은 면 방향(TopAbs_REVERSED)까지 반영한 "바깥쪽" 법선이다
+// (판재 앞/뒷면처럼 같은 위치에 마주보는 두 면을 부호로 구분하려고). faceBox는 그 면 자체의
+// 범위 - 클릭 좌표에서 "어느 면인지" 고를 때 무한 평면이 아니라 실제 면까지의 거리를 쓰기
+// 위해서다. 실 형상이 없는 어댑터(Mock)는 hasFaceBox=false로 두면 평면 거리로 대신한다.
 struct PlaneCandidate {
     std::string planeType; // Datum_Plane 등
     std::string partName;
     Vec3 pointOnPlane;
     Vec3 normal;
+    BoundingBox faceBox;
+    bool hasFaceBox = false;
 };
 
 // face_to_face_gap 측정용 면 후보. Phase4b 초안: 실제 면 테셀레이션이 아니라
 // 중심점 + 법선벡터로 근사한다 (面 형상 전체가 아닌 대표점 기준 gap 계산).
 // 회사PC에서 실제 JT 테셀레이션 데이터가 들어오면 최단거리 탐색으로 교체 필요.
+// (클릭 좌표가 있는 규칙은 이 구조체 대신 PlaneCandidate로 면을 고른다 - RuleEngine 참고)
 struct FaceCandidate {
     std::string faceType; // Rib_Top_Surface, Boss_Outer_Wall, ...
     std::string partName;
@@ -137,6 +146,11 @@ struct FeaturePatchCapture {
     FeaturePatchDescriptor descriptor;
     Vec3 position;
     bool valid = false; // clickPoint 근처에서 형상을 못 찾으면 false
+    // § 캡처 미리보기(2026-09-18) - "선택된 영역이 안 보인다"는 피드백. 패치를 구성하는
+    // 면들 전체의 삼각형(월드좌표, 3개씩 짝, PickResult::highlightTriangles와 같은 형식) -
+    // ShapePresetDialog가 이걸로 뷰어에 캡처된 형상 전체를 하이라이트해서 보여준다(면
+    // 하나만 찍힌 게 아니라 여러 면으로 이뤄진 패치라는 걸 눈으로 확인 가능하게).
+    std::vector<Vec3> highlightTriangles;
 };
 
 // FindPatchCandidates 결과 하나 - AnchorCandidate와 같은 성격(좌표 + 이번엔 유사도 점수).
@@ -179,6 +193,20 @@ public:
         return PickResult{};
     }
 
+    // § 측정 엔진 점 후보(2026-10-30) - PickFace의 포인트 스냅과 같은 정의(꼭짓점/모서리
+    // 중간점/원 중심/교차점)로, searchCenter에서 radiusMm 안에 있는 점들을 돌려준다. 예전엔 클릭으로
+    // 만든 점 규칙을 엔진이 다시 찾을 방법이 없어 항상 실패했다. StartPoint/EndPoint/Vertex는
+    // 모두 "꼭짓점"으로 취급한다(모서리 방향에 따라 시작/끝이 바뀌어 인치 간 구분이 안정적이지
+    // 않음). 실 형상이 없는 어댑터는 override 불필요.
+    virtual std::vector<AnchorCandidate> FindPointCandidates(
+        ModelHandle handle, PointSubKind subKind, const Vec3& searchCenter, double radiusMm) const {
+        (void)handle;
+        (void)subKind;
+        (void)searchCenter;
+        (void)radiusMm;
+        return {};
+    }
+
     // § 형상 프리셋 - clickPoint 근처의 면에서 시작해 인접 면으로 확장한 패치의 지문을
     // 계산한다. 실 형상 B-rep이 없는 어댑터(Mock, 미구현 NxJt)는 override 불필요.
     virtual FeaturePatchCapture CaptureFeaturePatch(ModelHandle handle, const Vec3& clickPoint) const {
@@ -195,6 +223,46 @@ public:
         (void)descriptor;
         (void)similarityThreshold;
         return {};
+    }
+
+    // § 형상 프리셋 수동 선택(2026-09-18) - "자동으로 인접 면까지 묶어서 캡처"
+    // (CaptureFeaturePatch)만으로는 원하는 형상과 다르게 잡힐 때(면이 덜 붙거나 엉뚱한
+    // 곳까지 번짐) 사용자가 직접 면을 하나씩 클릭해서 고를 수 있어야 한다는 피드백 -
+    // "마우스로 드래그/클릭해서 면을 선택 + Shift로 선택 해제". 인덱스는 이 handle에
+    // 대해 항상 같은 순서로 매겨지는 안정적인 값이라(모델이 안 바뀌는 한 TopExp_Explorer
+    // 순회 순서가 고정) 클릭마다 다시 계산할 필요 없이 선택 집합(추가/제거)을 그냥
+    // int 목록으로 관리하면 된다.
+    virtual int PickFaceIndex(ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const {
+        (void)handle;
+        (void)rayOrigin;
+        (void)rayDir;
+        return -1;
+    }
+
+    // 면 인덱스 하나의 하이라이트 삼각형 - 수동 선택 중 "지금까지 고른 면들"을 화면에
+    // 계속 보여주기 위해 선택할 때마다 누적해서 쓴다.
+    virtual std::vector<Vec3> GetFaceHighlightTriangles(ModelHandle handle, int faceIndex) const {
+        (void)handle;
+        (void)faceIndex;
+        return {};
+    }
+
+    // 사용자가 고른 면 인덱스 집합으로 지문을 만든다 - ExtractFeaturePatch의 자동 인접
+    // 확장(이면각 기준)을 타지 않고, 정확히 이 면들만으로 FeaturePatchDescriptor를 계산한다.
+    virtual FeaturePatchCapture CaptureManualPatch(ModelHandle handle, const std::vector<int>& faceIndices) const {
+        (void)handle;
+        (void)faceIndices;
+        return FeaturePatchCapture{};
+    }
+
+    // § 드래그 영역 다중 선택 - "전체 면이 사각형 안에 다 들어와야 선택되게 해달라"는
+    // 요청(2026-09-29) - 일부만 걸쳐도 잡히던 문제 수정. 뷰어가 이 값으로 0..count-1을
+    // 전부 순회하며 각 면의 전체 삼각형이 화면 사각형 안에 있는지 직접 확인한다(부분
+    // 걸침이면 제외) - PickFaceIndex의 광선 샘플링(격자 간격 사이로 작은 면을 놓칠 수
+    // 있음)보다 정확하다.
+    virtual int GetFaceCount(ModelHandle handle) const {
+        (void)handle;
+        return 0;
     }
 
     // 뷰어가 실제 렌더링에 쓰는 삼각형 메시. 연속된 3개 Vec3가 삼각형 1개(flat 셰이딩,

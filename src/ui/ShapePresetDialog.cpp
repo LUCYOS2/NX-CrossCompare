@@ -18,6 +18,8 @@
 #include <QTableWidgetItem>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace ui {
 
 namespace {
@@ -46,6 +48,15 @@ ShapePresetDialog::ShapePresetDialog(
 
     captureButton_ = new QPushButton("형상 클릭해서 등록...", this);
     connect(captureButton_, &QPushButton::clicked, this, &ShapePresetDialog::onCaptureClicked);
+    // § 형상 프리셋 수동 선택(2026-09-18) - "자동으로 인접 면까지 묶는 게 의도와 다르게
+    // 잡힌다"는 피드백에 따른 대안 경로. 면을 하나씩 클릭(추가)/Shift+클릭(제거)해서
+    // 정확히 원하는 면들만 고를 수 있다.
+    manualSelectButton_ = new QPushButton("면 직접 선택...", this);
+    connect(manualSelectButton_, &QPushButton::clicked, this, &ShapePresetDialog::onManualSelectClicked);
+    finishManualSelectButton_ = new QPushButton("선택 완료", this);
+    finishManualSelectButton_->setVisible(false);
+    connect(finishManualSelectButton_, &QPushButton::clicked, this,
+            &ShapePresetDialog::onFinishManualSelectClicked);
     captureStatusLabel_ = new QLabel("아직 캡처된 형상이 없습니다.", this);
     captureStatusLabel_->setWordWrap(true);
 
@@ -81,7 +92,11 @@ ShapePresetDialog::ShapePresetDialog(
     leftLayout->addWidget(new QLabel("대상 인치", this));
     leftLayout->addWidget(modelCombo_);
     leftLayout->addWidget(viewerHost_, 1);
-    leftLayout->addWidget(captureButton_);
+    auto* captureButtonsRow = new QHBoxLayout();
+    captureButtonsRow->addWidget(captureButton_);
+    captureButtonsRow->addWidget(manualSelectButton_);
+    captureButtonsRow->addWidget(finishManualSelectButton_);
+    leftLayout->addLayout(captureButtonsRow);
     leftLayout->addWidget(captureStatusLabel_);
     leftLayout->addLayout(registerForm);
     leftLayout->addWidget(findSameModelButton_);
@@ -151,11 +166,16 @@ void ShapePresetDialog::RebuildViewer() {
     viewerPanel_->setMinimumSize(kViewerMinWidth, kViewerMinHeight);
     viewerPanel_->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     connect(viewerPanel_, &viewer::MultiViewportPanel::facePicked, this, &ShapePresetDialog::onFacePicked);
+    connect(viewerPanel_, &viewer::MultiViewportPanel::facesInRegionPicked, this,
+            &ShapePresetDialog::onFacesInRegionPicked);
     viewerHost_->layout()->addWidget(viewerPanel_);
 }
 
 void ShapePresetDialog::ResetCaptureState() {
     pickArmed_ = false;
+    manualSelectMode_ = false;
+    manualSelectedFaces_.clear();
+    finishManualSelectButton_->setVisible(false);
     hasCapturedPatch_ = false;
     capturedDescriptor_ = geometry::FeaturePatchDescriptor{};
     capturedHandle_ = geometry::kInvalidModelHandle;
@@ -165,6 +185,8 @@ void ShapePresetDialog::ResetCaptureState() {
     saveButton_->setEnabled(false);
     if (viewerPanel_) {
         viewerPanel_->setPickModeActive(false);
+        viewerPanel_->setRegionSelectModeActive(false);
+        viewerPanel_->SetCapturedPatchHighlight({});
     }
 }
 
@@ -172,12 +194,76 @@ void ShapePresetDialog::onCaptureClicked() {
     if (!viewerPanel_) {
         return;
     }
+    manualSelectMode_ = false;
+    manualSelectedFaces_.clear();
+    finishManualSelectButton_->setVisible(false);
     pickArmed_ = true;
     captureStatusLabel_->setText("피킹 대기 중 - 뷰어에서 등록하려는 형상을 클릭하세요.");
+    viewerPanel_->setRegionSelectModeActive(false);
     viewerPanel_->setPickModeActive(true);
 }
 
-void ShapePresetDialog::onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir) {
+void ShapePresetDialog::onManualSelectClicked() {
+    if (!viewerPanel_) {
+        return;
+    }
+    pickArmed_ = false;
+    manualSelectMode_ = true;
+    manualSelectedFaces_.clear();
+    viewerPanel_->SetCapturedPatchHighlight({});
+    finishManualSelectButton_->setVisible(true);
+    captureStatusLabel_->setText(
+        "면 선택 중(0개) - 클릭=추가/Shift+클릭=제거, Ctrl+드래그=사각형 안 전체 추가(Ctrl+Shift+드래그=제거). "
+        "일반 드래그는 예전처럼 화면 회전입니다. 다 고르면 \"선택 완료\"를 누르세요.");
+    // § 드래그 영역 다중 선택 - 수동 선택 모드에서만 켠다. 일반 "지정..." 흐름
+    // (onCaptureClicked, RuleEditorDialog 등)은 꺼둬서 "피킹 모드 중 드래그=회전"이라는
+    // 기존 동작을 그대로 유지한다.
+    viewerPanel_->setRegionSelectModeActive(true);
+    viewerPanel_->setPickModeActive(true);
+}
+
+void ShapePresetDialog::onFinishManualSelectClicked() {
+    if (!manualSelectMode_) {
+        return;
+    }
+    manualSelectMode_ = false;
+    finishManualSelectButton_->setVisible(false);
+    if (viewerPanel_) {
+        viewerPanel_->setPickModeActive(false);
+        viewerPanel_->setRegionSelectModeActive(false);
+    }
+    if (manualSelectedFaces_.empty()) {
+        QMessageBox::information(this, "선택 없음", "면을 하나도 선택하지 않았습니다.");
+        ResetCaptureState();
+        return;
+    }
+    const geometry::ModelHandle handle = SelectedModelHandle();
+    const geometry::FeaturePatchCapture capture = adapter_->CaptureManualPatch(handle, manualSelectedFaces_);
+    if (!capture.valid) {
+        QMessageBox::warning(this, "캡처 실패", "선택한 면들로 형상 패치를 만들지 못했습니다.");
+        return;
+    }
+    ApplyCapture(handle, capture);
+}
+
+void ShapePresetDialog::onFacePicked(
+    geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir, bool shiftHeld) {
+    const geometry::Vec3 origin{rayOrigin.x(), rayOrigin.y(), rayOrigin.z()};
+    const geometry::Vec3 dir{rayDir.x(), rayDir.y(), rayDir.z()};
+
+    if (manualSelectMode_) {
+        const int faceIndex = adapter_->PickFaceIndex(handle, origin, dir);
+        if (faceIndex < 0) {
+            return; // 형상을 못 찾은 클릭은 조용히 무시(모드가 계속 유지돼야 함).
+        }
+        ToggleManualFace(faceIndex, shiftHeld);
+        UpdateManualSelectionHighlight();
+        captureStatusLabel_->setText(QString("면 선택 중(%1개) - 클릭=추가/Shift+클릭=제거, Ctrl+드래그=사각형 안 "
+                                              "전체 추가(Ctrl+Shift+드래그=제거). 다 고르면 \"선택 완료\"를 누르세요.")
+                                          .arg(manualSelectedFaces_.size()));
+        return;
+    }
+
     if (!pickArmed_) {
         return;
     }
@@ -186,8 +272,6 @@ void ShapePresetDialog::onFacePicked(geometry::ModelHandle handle, QVector3D ray
         viewerPanel_->setPickModeActive(false);
     }
 
-    const geometry::Vec3 origin{rayOrigin.x(), rayOrigin.y(), rayOrigin.z()};
-    const geometry::Vec3 dir{rayDir.x(), rayDir.y(), rayDir.z()};
     const geometry::PickResult pick = adapter_->PickFace(handle, origin, dir);
     if (pick.kind == geometry::PickedFaceKind::None) {
         QMessageBox::information(this, "다시 클릭해주세요", "형상을 찾지 못했습니다 - 면 위를 클릭했는지 확인하세요.");
@@ -200,10 +284,58 @@ void ShapePresetDialog::onFacePicked(geometry::ModelHandle handle, QVector3D ray
             this, "캡처 실패", "클릭한 위치에서 형상 패치를 만들지 못했습니다 - 다른 지점을 클릭해보세요.");
         return;
     }
+    ApplyCapture(handle, capture);
+}
 
+void ShapePresetDialog::onFacesInRegionPicked(
+    geometry::ModelHandle handle, std::vector<int> faceIndices, bool shiftHeld) {
+    if (!manualSelectMode_ || faceIndices.empty()) {
+        return;
+    }
+    (void)handle; // 대상 인치는 뷰어가 하나뿐이라 이미 SelectedModelHandle()과 같음.
+    for (int faceIndex : faceIndices) {
+        ToggleManualFace(faceIndex, shiftHeld);
+    }
+    UpdateManualSelectionHighlight();
+    captureStatusLabel_->setText(QString("면 선택 중(%1개) - 클릭=추가/Shift+클릭=제거, Ctrl+드래그=사각형 안 전체 "
+                                          "추가(Ctrl+Shift+드래그=제거). 다 고르면 \"선택 완료\"를 누르세요.")
+                                      .arg(manualSelectedFaces_.size()));
+}
+
+void ShapePresetDialog::ToggleManualFace(int faceIndex, bool shiftHeld) {
+    const auto it = std::find(manualSelectedFaces_.begin(), manualSelectedFaces_.end(), faceIndex);
+    if (shiftHeld) {
+        if (it != manualSelectedFaces_.end()) {
+            manualSelectedFaces_.erase(it);
+        }
+    } else if (it == manualSelectedFaces_.end()) {
+        manualSelectedFaces_.push_back(faceIndex);
+    }
+}
+
+void ShapePresetDialog::UpdateManualSelectionHighlight() {
+    if (!viewerPanel_) {
+        return;
+    }
+    const geometry::ModelHandle handle = SelectedModelHandle();
+    std::vector<geometry::Vec3> triangles;
+    for (int faceIndex : manualSelectedFaces_) {
+        const auto faceTriangles = adapter_->GetFaceHighlightTriangles(handle, faceIndex);
+        triangles.insert(triangles.end(), faceTriangles.begin(), faceTriangles.end());
+    }
+    viewerPanel_->SetCapturedPatchHighlight(triangles);
+}
+
+void ShapePresetDialog::ApplyCapture(geometry::ModelHandle handle, const geometry::FeaturePatchCapture& capture) {
     hasCapturedPatch_ = true;
     capturedDescriptor_ = capture.descriptor;
     capturedHandle_ = handle;
+    // § "선택된 영역이 안 보인다" 피드백 - 캡처된 패치(면 여러 개일 수 있음)를 뷰어에
+    // 초록색으로 고정 하이라이트해서, 면 하나만이 아니라 인접 면들까지 묶여서 캡처됐다는
+    // 걸 눈으로 바로 확인할 수 있게 한다.
+    if (viewerPanel_) {
+        viewerPanel_->SetCapturedPatchHighlight(capture.highlightTriangles);
+    }
     captureStatusLabel_->setText(QString("캡처됨 - 면 %1개, bbox비율(%2, %3, %4), 경계비율 %5, 대표반지름비율 %6")
                                       .arg(capture.descriptor.faceCount)
                                       .arg(capture.descriptor.bboxRatioX, 0, 'f', 2)

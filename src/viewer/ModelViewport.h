@@ -8,6 +8,7 @@
 #include <QPixmap>
 #include <QPoint>
 #include <QPointF>
+#include <QRect>
 #include <QRectF>
 #include <QString>
 #include <QVector3D>
@@ -71,6 +72,19 @@ public:
     void SetCaptureRegionModePtr(const bool* captureRegionModeActive) {
         captureRegionModeActive_ = captureRegionModeActive;
     }
+
+    // § 드래그 영역 다중 선택(2026-09-23) - pickModeActive_와 같이 켜져 있을 때만 의미
+    // 있다. *ptr이 true면 피킹 모드 중 좌클릭 드래그가 "뷰 회전"(기존 기본 동작) 대신
+    // 사각형 다중 선택으로 바뀐다 - MultiViewportPanel::setRegionSelectModeActive 참고.
+    void SetRegionSelectModePtr(const bool* regionSelectModeActive) {
+        regionSelectModeActive_ = regionSelectModeActive;
+    }
+
+    // § 형상 프리셋 캡처 하이라이트(2026-09-18) - "선택된 영역이 안 보인다"는 피드백.
+    // 마우스가 움직이면 사라지는 hoverFaceTriangles_(라이브 미리보기)와 달리, 이건
+    // ShapePresetDialog가 캡처를 확정한 뒤 "지금까지 이 형상이 등록돼 있다"를 계속
+    // 보여주기 위한 고정 하이라이트 - 빈 벡터를 넘기면 꺼진다.
+    void SetCapturedPatchHighlight(const std::vector<geometry::Vec3>& worldTriangles);
 
     // § 캡쳐 화질 수정(2026-09-11) - 드래그 캡쳐가 검은 화면만 나오는 버그 수정. 일반
     // QWidget::grab()은 QOpenGLWidget에서는 위젯 합성(backing store) 경로를 타는데, 이
@@ -149,10 +163,17 @@ signals:
     void hoverEntered();
     // 피킹 모드 중 좌클릭 - 클릭 순간의 월드 광선(origin/dir)을 그대로 넘긴다. 실제
     // "이게 무슨 면이냐" 판별은 IGeometryAdapter::PickFace(OCCT)가 하므로 여기선 광선만.
-    void facePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir);
+    // § 형상 프리셋 수동 선택(2026-09-18) - shiftHeld는 "Shift+클릭 = 선택 해제" 용도
+    // (ShapePresetDialog 수동 선택 모드). 일반 피킹(RuleEditorDialog 등)은 이 값을 무시.
+    void facePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir, bool shiftHeld);
     // 캡쳐 영역 드래그가 끝났을 때 - 그 사각형만 잘라낸 픽스맵 + 그 순간의 CaptureInfo
     // (이미지 위 클릭 피킹용).
     void captureRegionGrabbed(QPixmap pixmap, ModelViewport::CaptureInfo info);
+    // § 드래그 영역 다중 선택 - regionSelectModeActive_ 중 피킹 모드 드래그가 끝났을 때.
+    // 사각형 안을 격자로 샘플링해서 찾은 면 인덱스 목록(IGeometryAdapter::PickFaceIndex
+    // 기준, 중복 제거됨) - 위젯 크기/카메라 정보가 이 클래스 안에만 있어서 광선 계산
+    // 자체는 여기서 끝내고 결과만 내보낸다.
+    void facesInRegionPicked(geometry::ModelHandle handle, std::vector<int> faceIndices, bool shiftHeld);
 
 protected:
     void initializeGL() override;
@@ -183,6 +204,14 @@ private:
     const bool* independentModePtr_ = nullptr; // MultiViewportPanel 소유, 생성 직후 SetIndependentModePtr로 연결됨
     const bool* pickModeActive_ = nullptr;     // MultiViewportPanel 소유, RuleEditorDialog가 켬/끔
     const bool* captureRegionModeActive_ = nullptr; // MultiViewportPanel 소유, RuleEditorDialog가 켬/끔
+    const bool* regionSelectModeActive_ = nullptr;  // MultiViewportPanel 소유, ShapePresetDialog가 켬/끔
+    // § 드래그 영역 다중 선택 - 피킹 모드 중 좌클릭을 누른 순간에는 아직 "클릭인지
+    // 드래그인지" 모르므로(mouseReleaseEvent에서 갈라 처리), 눌린 위치와 눌림 상태만
+    // 우선 기록해둔다.
+    QPoint pickDragStart_;
+    bool pickDragActive_ = false; // 버튼이 눌려 있는 동안 true(클릭/드래그 아직 미정)
+    bool pickDidDrag_ = false;    // 임계값을 넘게 움직였으면 true - "클릭"이 아니라 "드래그"였다는 확정
+    QRubberBand* pickRegionRubberBand_ = nullptr; // 드래그가 임계값을 넘을 때만 lazy 생성
     const bool* cameraLockedPtr_ = nullptr;    // MultiViewportPanel 소유, RuleEditorDialog가 켬/끔
     QPoint lastMousePos_;
     QRubberBand* rubberBand_ = nullptr; // 캡쳐 영역 드래그 중에만 lazy 생성
@@ -231,6 +260,12 @@ private:
     // 이 데이터를 hoverFaceVbo_/hoverEdgeVbo_로 업로드한다(hoverPickPoint_와 같은 패턴).
     std::vector<QVector3D> hoverFaceTriangles_;
     std::vector<QVector3D> hoverEdgeSegments_;
+
+    // § 형상 프리셋 캡처 하이라이트 - hoverFaceVao_/Vbo_와 같은 셰이더 패스(isHoverFacePass)를
+    // 재사용하되, 마우스 이동과 무관하게 항상(고정) 그려진다는 점만 다르다.
+    QOpenGLVertexArrayObject capturedFaceVao_;
+    QOpenGLBuffer capturedFaceVbo_{QOpenGLBuffer::VertexBuffer};
+    std::vector<QVector3D> capturedFaceTriangles_;
 
     // § CTQ 치수선 - 포인트 2개 사이를 잇는 선(GL_LINES, 항상 위에 보이게 깊이 테스트 무시).
     QOpenGLVertexArrayObject lineVao_;

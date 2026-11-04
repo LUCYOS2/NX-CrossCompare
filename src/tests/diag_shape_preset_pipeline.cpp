@@ -112,6 +112,12 @@ int main(int argc, char** argv) {
     rule::Anchor anchor;
     anchor.role = "single";
     anchor.anchorType = "preset:DIAG_SNAP";
+    // § 회귀 테스트(2026-09-18) - "hook 높이 규칙이 ambiguous candidates로 실패" 버그.
+    // 축 방향 필터를 켜둔 채로 프리셋 포인트를 추가하면 FilterByAxisDirection이
+    // candidate.axis={0,0,0}을 90도로 취급해 후보를 전부 걸러냈었다 - 이 값을 설정해도
+    // InstanceCount 결과가 달라지지 않아야 정상(ApplyAnchorFilters가 프리셋 후보에는
+    // 축 필터를 건너뛰도록 수정됨).
+    anchor.directionAxis = "X";
     rule.anchors.push_back(anchor);
     const int ruleId = db.SaveRule(projectId, rule);
     std::printf("[4] 규칙 저장 완료 - rule id=%d\n", ruleId);
@@ -131,6 +137,11 @@ int main(int argc, char** argv) {
     try {
         const auto results = rule::RuleEngine::Evaluate(adapter, handlesByInch, loadedRule);
         for (const auto& r : results) {
+            // § 인치별 오류 분리(2026-10-30) - Evaluate는 이제 인치별 실패를 던지지 않고 ok=false로 돌려준다.
+            if (!r.ok) {
+                std::fprintf(stderr, "RuleEngine::Evaluate 실패 - inch=%d: %s\n", r.inch, r.error.c_str());
+                return 1;
+            }
             std::printf("[6] RuleEngine::Evaluate 성공 - inch=%d value(매칭 개수)=%.0f\n", r.inch, r.value);
         }
     } catch (const std::exception& e) {

@@ -1,7 +1,8 @@
 #include "ui/RuleEditorDialog.h"
 
 #include "rule/BuiltInCatalog.h"
-#include "ui/AnchorSearchDialog.h"
+#include "rule/RuleEngine.h"
+#include "rule/Selector.h"
 #include "ui/ShapePresetDialog.h"
 #include "viewer/MultiViewportPanel.h"
 
@@ -139,11 +140,10 @@ RuleEditorDialog::RuleEditorDialog(
 
     pickPointButton_ = new QPushButton("지정...", this);
     connect(pickPointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onPickPointClicked);
-    searchPointButton_ = new QPushButton("검색으로 추가...", this);
-    connect(searchPointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onSearchPointClicked);
-    // § 형상 프리셋(2026-09-18) - Hole/Boss_Center(원통) 외 Hook/Flange류처럼 부품
-    // 이름도 없는 복합 형상을 자동 검색하기 위한 별도 경로. AnchorSearchDialog는
-    // anchor_type이 Hole/Boss_Center로 고정돼 있어 여기서는 못 다룬다.
+    // § 형상 프리셋(2026-09-18) - "포인트 검색"(AnchorSearchDialog, Hole/Boss_Center
+    // 텍스트+지름 검색)을 완전히 대체. Hole/Boss_Center도 형상 프리셋으로 등록해서 쓸 수
+    // 있고, Hook/Flange류(부품 이름도 없는 복합 형상)까지 커버하는 상위 호환이라 두 개를
+    // 같이 둘 이유가 없다는 사용자 판단(2026-09-18) - 옛 AnchorSearchDialog는 삭제.
     presetPointButton_ = new QPushButton("프리셋으로 추가...", this);
     connect(presetPointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onAddPresetPointClicked);
     deletePointButton_ = new QPushButton("선택 포인트 삭제", this);
@@ -156,7 +156,6 @@ RuleEditorDialog::RuleEditorDialog(
     pointMeasureSection->addWidget(nextPointDirection_);
     pointMeasureSection->addStretch(1);
     pointMeasureSection->addWidget(pickPointButton_);
-    pointMeasureSection->addWidget(searchPointButton_);
     pointMeasureSection->addWidget(presetPointButton_);
     pointMeasureSection->addWidget(deletePointButton_);
 
@@ -272,6 +271,21 @@ RuleEditorDialog::RuleEditorDialog(
     manageSection->addWidget(pointsTable_);
     manageSection->addWidget(pointProgressLabel_);
 
+    // ---- 우측: 4) 도면 스펙 ----
+    // § 도면 스펙(2026-10-30) - "합격/불합격 판정하려면 도면 치수가 필요하고, 사이즈별로
+    // 값이 다르면 사이즈별 값도 필요하다"는 요청(도면 스펙 = nominal, 같은 개념). 인치마다 한
+    // 행, 값을 넣은 인치만 도면 스펙 ± 공차(3)의 공차 +/-)로 판정하고, 비워둔 인치는 예전처럼 인치 간 비교만 한다.
+    specTable_ = new QTableWidget(this);
+    specTable_->setColumnCount(2);
+    specTable_->setHorizontalHeaderLabels({"인치", "도면 스펙 (mm)"});
+    specTable_->verticalHeader()->hide();
+    specTable_->horizontalHeader()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    specTable_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    specTable_->setMaximumHeight(140);
+    auto* specSection = new QVBoxLayout();
+    specSection->addWidget(new QLabel("4) 도면 스펙 - 인치별 도면 치수 (비우면 가장 작은 인치 대비 비교만)", this));
+    specSection->addWidget(specTable_);
+
     addOrUpdateButton_ = new QPushButton("규칙 추가", this);
     connect(addOrUpdateButton_, &QPushButton::clicked, this, &RuleEditorDialog::onAddOrUpdateClicked);
     // § 같은 캡쳐에서 여러 CTQ 항목 만들기 - "한 캡쳐로 여러 측정 항목을 만들 수도
@@ -294,6 +308,7 @@ RuleEditorDialog::RuleEditorDialog(
     rightLayout_->addLayout(nameSection);
     rightLayout_->addLayout(pointMeasureSection);
     rightLayout_->addLayout(manageSection);
+    rightLayout_->addLayout(specSection);
     rightLayout_->addLayout(saveButtonsRow);
     rightLayout_->addStretch(1);
     auto* rightWidget = new QWidget(this);
@@ -332,6 +347,88 @@ void RuleEditorDialog::RewireModels(const std::vector<std::pair<std::string, geo
     models_ = models;
     PopulateTargetModelCombo();
     RebuildEditorPanel();
+}
+
+void RuleEditorDialog::SetAvailableInches(const std::vector<int>& inches) {
+    // 이미 입력 중인 값은 유지한 채 행만 다시 맞춘다(STEP 재로드로 인치가 늘어날 수 있음).
+    std::map<int, double> current;
+    ReadSpecs(current, nullptr);
+    availableInches_ = inches;
+    RefreshSpecTable(current);
+}
+
+void RuleEditorDialog::RefreshSpecTable(const std::map<int, double>& values) {
+    std::vector<int> inches = availableInches_;
+    for (const auto& [inch, value] : values) {
+        if (std::find(inches.begin(), inches.end(), inch) == inches.end()) {
+            inches.push_back(inch); // 지금은 안 불러왔지만 저장돼 있던 인치도 지우지 않고 보여준다.
+        }
+    }
+    std::sort(inches.begin(), inches.end());
+    specTable_->setRowCount(static_cast<int>(inches.size()));
+    for (size_t row = 0; row < inches.size(); ++row) {
+        const int inch = inches[row];
+        auto* inchItem = new QTableWidgetItem(QString("%1\"").arg(inch));
+        inchItem->setData(Qt::UserRole, inch);
+        inchItem->setFlags(inchItem->flags() & ~Qt::ItemIsEditable);
+        specTable_->setItem(static_cast<int>(row), 0, inchItem);
+        const auto it = values.find(inch);
+        specTable_->setItem(static_cast<int>(row), 1,
+                               new QTableWidgetItem(it != values.end() ? QString::number(it->second, 'f', 3) : QString()));
+    }
+}
+
+bool RuleEditorDialog::ReadSpecs(std::map<int, double>& out, int* badInch) const {
+    out.clear();
+    for (int row = 0; row < specTable_->rowCount(); ++row) {
+        const auto* inchItem = specTable_->item(row, 0);
+        const auto* valueItem = specTable_->item(row, 1);
+        if (!inchItem || !valueItem) {
+            continue;
+        }
+        const QString text = valueItem->text().trimmed();
+        if (text.isEmpty()) {
+            continue;
+        }
+        bool ok = false;
+        const double value = text.toDouble(&ok);
+        if (!ok) {
+            if (badInch) {
+                *badInch = inchItem->data(Qt::UserRole).toInt();
+            }
+            return false;
+        }
+        out[inchItem->data(Qt::UserRole).toInt()] = value;
+    }
+    return true;
+}
+
+rule::Anchor RuleEditorDialog::MakeAnchor(const PointEntry& p, const std::string& role) {
+    rule::Anchor a;
+    a.role = role;
+    a.anchorType = p.type;
+    a.partName = p.partName;
+    if (p.diameterMm > 0.0) {
+        a.paramKey = "diameter";
+        a.paramValue = p.diameterMm;
+    }
+    if (!p.directionAxis.empty()) {
+        a.directionAxis = p.directionAxis;
+    }
+    a.patchDescriptor = p.patchDescriptor;
+    a.ref = p.ref;
+    return a;
+}
+
+rule::PlaneRef RuleEditorDialog::MakePlaneRef(const PointEntry& p) {
+    rule::PlaneRef plane;
+    plane.planeType = p.type;
+    plane.partName = p.partName;
+    if (!p.directionAxis.empty()) {
+        plane.normalAxis = p.directionAxis;
+    }
+    plane.ref = p.ref;
+    return plane;
 }
 
 void RuleEditorDialog::PopulateTargetModelCombo() {
@@ -474,6 +571,37 @@ void RuleEditorDialog::RefreshMarkers() {
         dimensionLinePoints = {dispA, dispB};
         // 두 점 다 실제 위치 -> 표시 위치로 이어주는 가이드선을 그린다(차이가 없으면
         // 길이 0이라 안 보일 뿐, 생략해도 결과는 같다).
+        extensionFrom = {trueA, trueB};
+        extensionTo = {dispA, dispB};
+    } else if (positioned.size() == 2 && !positioned[0]->hasDimensionOffset && !positioned[1]->hasDimensionOffset) {
+        // § 일반 측정 치수선 드래그(2026-09-18) - "일반 측정(3D/normal 등)도 전장
+        // 사이즈처럼 여백으로 옮길 수 있게 해달라"는 요청. 축 정렬(위 분기)과 달리 두
+        // 번째 점을 재투영하지 않고 실제 3D 대각선을 그대로 유지한 채, 오프셋만 더해서
+        // 화면 여백으로 밀어낼 수 있게 한다 - 측정값 계산에는 영향 없음(표시 위치만).
+        const QVector3D trueA(
+            static_cast<float>(positioned[0]->position.x), static_cast<float>(positioned[0]->position.y),
+            static_cast<float>(positioned[0]->position.z));
+        const QVector3D trueB(
+            static_cast<float>(positioned[1]->position.x), static_cast<float>(positioned[1]->position.y),
+            static_cast<float>(positioned[1]->position.z));
+        positions = {trueA, trueB};
+
+        QVector3D dispA = trueA;
+        QVector3D dispB = trueB;
+        const std::string offsetAxis = ChooseOverallSizeOffsetAxis(manualProjectionAxis);
+        currentOverallSizeOffsetAxis_ = offsetAxis;
+        if (offsetAxis == "X") {
+            dispA.setX(dispA.x() + manualDimensionOffsetDelta_);
+            dispB.setX(dispB.x() + manualDimensionOffsetDelta_);
+        } else if (offsetAxis == "Y") {
+            dispA.setY(dispA.y() + manualDimensionOffsetDelta_);
+            dispB.setY(dispB.y() + manualDimensionOffsetDelta_);
+        } else {
+            dispA.setZ(dispA.z() + manualDimensionOffsetDelta_);
+            dispB.setZ(dispB.z() + manualDimensionOffsetDelta_);
+        }
+
+        dimensionLinePoints = {dispA, dispB};
         extensionFrom = {trueA, trueB};
         extensionTo = {dispA, dispB};
     } else {
@@ -785,6 +913,7 @@ void RuleEditorDialog::resetForm() {
     projection_->setCurrentIndex(0);
     tolerancePlus_->setValue(0.0);
     toleranceMinus_->setValue(0.0);
+    RefreshSpecTable({});
     table_->clearSelection();
     ruleImagePath_.clear();
     pickStatusLabel_->hide();
@@ -858,6 +987,16 @@ void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
         } else {
             p.kind = geometry::PickedFaceKind::Cylinder;
         }
+        // § 형상 프리셋 - LoadRule()이 이미 project_id+이름으로 shape_presets에서 지문을
+        // 찾아 채워준 값을 그대로 옮긴다(아래 ResolveLoadedPointPositions가 재검색에 씀).
+        p.patchDescriptor = a.patchDescriptor;
+        p.ref = a.ref;
+        // § 클릭 기준 좌표 - 예전엔 Hole이 아닌 평면 anchor(face_to_face_gap의 두 면)도
+        // Cylinder로 복원돼서 다시 저장하면 측정타입 추론이 틀어졌다. 평면 타입이거나 평면을
+        // 클릭한 기록(법선)이 있으면 Plane으로 복원한다.
+        if (a.anchorType == "Datum_Plane" || (a.ref.has_value() && a.ref->normal.has_value())) {
+            p.kind = geometry::PickedFaceKind::Plane;
+        }
         points_.push_back(std::move(p));
     }
     if (r.referencePlane.has_value()) {
@@ -866,10 +1005,17 @@ void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
         p.partName = r.referencePlane->partName;
         p.directionAxis = r.referencePlane->normalAxis.value_or(std::string());
         p.kind = geometry::PickedFaceKind::Plane;
+        p.ref = r.referencePlane->ref;
         points_.push_back(std::move(p));
     }
+    // § 규칙 다시 열면 마커/치수선이 사라지는 버그 수정(2026-09-18) - DB에서 막 불러온
+    // 포인트는 좌표가 없다(hasPosition==false, anchor_type/조건만 있음). 현재 "대상
+    // 인치"로 지정된 모델에서 그 조건을 다시 검색해 실제 좌표를 채워야 마커/치수선이
+    // 예전처럼 보인다 - RuleEngine이 실제 평가 때 하는 것과 같은 재검색을 미리보기용으로
+    // 한 번 더 하는 셈(값 자체가 아니라 "어디 있는지 보여주기" 목적).
+    ResolveLoadedPointPositions();
     refreshPointsTable();
-    RefreshMarkers(); // DB에서 불러온 포인트는 좌표가 없어(hasPosition==false) 결국 다 지워짐.
+    RefreshMarkers();
 
     selector_->setCurrentText(r.selector.empty() ? "(없음)" : QString::fromStdString(r.selector.front()));
     if (!r.projection.empty()) {
@@ -877,6 +1023,7 @@ void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
     }
     tolerancePlus_->setValue(r.tolerancePlusMm);
     toleranceMinus_->setValue(r.toleranceMinusMm);
+    RefreshSpecTable(r.specByInch);
 
     // § 전장 사이즈 자동 포인트(2026-09-13 수정) - "화살표가 안 보인다" 버그의 실제 원인.
     // 예전엔 "points_.empty()일 때만" 자동 재계산했는데, 한 번이라도 저장된 적 있는
@@ -893,6 +1040,69 @@ void RuleEditorDialog::LoadRuleIntoForm(const rule::Rule& r) {
         AutoDetectOverallSizePointsIfApplicable();
         refreshPointsTable();
         RefreshMarkers();
+    }
+}
+
+void RuleEditorDialog::ResolveLoadedPointPositions() {
+    const geometry::ModelHandle handle = targetModelCombo_->currentIndex() >= 0
+        ? static_cast<geometry::ModelHandle>(targetModelCombo_->currentData().toInt())
+        : geometry::kInvalidModelHandle;
+    if (handle == geometry::kInvalidModelHandle) {
+        return;
+    }
+    for (auto& p : points_) {
+        if (p.hasPosition || p.kind == geometry::PickedFaceKind::Plane) {
+            continue; // 이미 좌표가 있거나(전장 사이즈 등) 평면(마커로 안 그림)은 건너뜀.
+        }
+        if (p.ref.has_value()) {
+            // § 클릭 기준 좌표 - 실제 평가(RuleEngine)와 똑같은 매칭으로 이 인치에서의 위치를
+            // 보여준다. 매칭에 실패하면 마커를 안 그린다(평가 결과에도 같은 사유로 실패가 뜸).
+            const auto position = rule::RuleEngine::ResolveAnchorPosition(*adapter_, handle, MakeAnchor(p, ""));
+            if (position) {
+                p.hasPosition = true;
+                p.position = *position;
+                p.modelHandle = handle;
+            }
+            continue;
+        }
+        if (p.patchDescriptor.has_value()) {
+            // § 형상 프리셋/수동 피킹 자동 재검색 - RuleEngine의 SelectBestPatchMatch와
+            // 같은 기준(유사도 최고점)으로 미리보기용 좌표를 고른다.
+            const auto candidates = adapter_->FindPatchCandidates(
+                handle, *p.patchDescriptor, geometry::kPatchSimilarityThreshold);
+            if (candidates.empty()) {
+                continue;
+            }
+            const auto best = std::max_element(
+                candidates.begin(), candidates.end(),
+                [](const geometry::PatchCandidate& a, const geometry::PatchCandidate& b) {
+                    return a.similarity < b.similarity;
+                });
+            p.hasPosition = true;
+            p.position = best->position;
+            p.modelHandle = handle;
+        } else if (p.kind == geometry::PickedFaceKind::Cylinder) {
+            auto candidates = adapter_->FindAnchorCandidates(handle, p.type, p.partName);
+            std::optional<std::string> paramKey;
+            std::optional<double> paramValue;
+            if (p.diameterMm > 0.0) {
+                paramKey = "diameter";
+                paramValue = p.diameterMm;
+            }
+            candidates = rule::FilterByDiameter(std::move(candidates), paramKey, paramValue);
+            if (!p.directionAxis.empty()) {
+                candidates = rule::FilterByAxisDirection(std::move(candidates), p.directionAxis, std::nullopt);
+            }
+            if (candidates.empty()) {
+                continue;
+            }
+            p.hasPosition = true;
+            p.position = candidates.front().position;
+            p.modelHandle = handle;
+        }
+        // patchDescriptor 없는 Point류(프리셋 도입 이전에 저장된 옛 Vertex 데이터)는
+        // 재검색할 방법이 없어 그대로 좌표 없음으로 남는다 - 규칙을 "지정..."으로 다시
+        // 찍으면 그때부터는 patchDescriptor가 생겨 이 문제가 없어진다.
     }
 }
 
@@ -913,29 +1123,11 @@ rule::Rule RuleEditorDialog::BuildRule() const {
         r.checkPointCategory = checkPointCategory_->currentText().toStdString();
     }
 
-    auto makeAnchor = [](const PointEntry& p, const std::string& role) {
-        rule::Anchor a;
-        a.role = role;
-        a.anchorType = p.type;
-        a.partName = p.partName;
-        if (p.diameterMm > 0.0) {
-            a.paramKey = "diameter";
-            a.paramValue = p.diameterMm;
-        }
-        if (!p.directionAxis.empty()) {
-            a.directionAxis = p.directionAxis;
-        }
-        return a;
-    };
-    auto makePlane = [](const PointEntry& p) {
-        rule::PlaneRef plane;
-        plane.planeType = p.type;
-        plane.partName = p.partName;
-        if (!p.directionAxis.empty()) {
-            plane.normalAxis = p.directionAxis;
-        }
-        return plane;
-    };
+    // § 클릭 기준 좌표(2026-10-30) - 예전엔 클릭한 점(Vertex류)을 저장할 때마다 주변 형상
+    // 지문을 이름 없는 프리셋("__auto_...")으로 DB에 새로 등록해 재검색했다. 그 방식은 위치가
+    // 꼭짓점이 아니라 주변 면들의 무게중심이었고, 대칭인 모서리가 여럿이면 엉뚱한 곳을
+    // 골랐으며, 저장할 때마다 프리셋이 쌓였다. 이제 클릭 좌표(p.ref)를 그대로 저장하고 엔진이
+    // 점 후보(FindPointCandidates)에서 그 자리를 찾는다 - BuildRule은 DB를 건드리지 않는다.
 
     const bool isSingleAnchor = r.measurementType == rule::MeasurementType::InstanceCount ||
                                  r.measurementType == rule::MeasurementType::MinPitch;
@@ -943,7 +1135,7 @@ rule::Rule RuleEditorDialog::BuildRule() const {
 
     if (isSingleAnchor) {
         if (!points_.empty()) {
-            r.anchors.push_back(makeAnchor(points_[0], "single"));
+            r.anchors.push_back(MakeAnchor(points_[0], "single"));
         }
     } else if (isPointToPlane) {
         // 리스트에서 kind==Plane인 항목을 referencePlane으로, 나머지 하나를 anchor(점)로.
@@ -957,17 +1149,17 @@ rule::Rule RuleEditorDialog::BuildRule() const {
             }
         }
         if (pointEntry) {
-            r.anchors.push_back(makeAnchor(*pointEntry, "single"));
+            r.anchors.push_back(MakeAnchor(*pointEntry, "single"));
         }
         if (planeEntry) {
-            r.referencePlane = makePlane(*planeEntry);
+            r.referencePlane = MakePlaneRef(*planeEntry);
         }
     } else {
         if (points_.size() >= 1) {
-            r.anchors.push_back(makeAnchor(points_[0], "A"));
+            r.anchors.push_back(MakeAnchor(points_[0], "A"));
         }
         if (points_.size() >= 2) {
-            r.anchors.push_back(makeAnchor(points_[1], "B"));
+            r.anchors.push_back(MakeAnchor(points_[1], "B"));
         }
     }
 
@@ -979,6 +1171,7 @@ rule::Rule RuleEditorDialog::BuildRule() const {
     r.projection = projection_->currentText().toStdString();
     r.tolerancePlusMm = tolerancePlus_->value();
     r.toleranceMinusMm = toleranceMinus_->value();
+    ReadSpecs(r.specByInch, nullptr); // 숫자가 아닌 칸은 ValidateFormForSave가 먼저 막는다
 
     return r;
 }
@@ -1010,6 +1203,13 @@ bool RuleEditorDialog::ValidateFormForSave() {
                 "point_to_plane은 포인트 1개(점) + 평면 1개가 필요합니다 - 평면을 클릭/검색으로 추가했는지 확인하세요.");
             return false;
         }
+    }
+    std::map<int, double> specs;
+    int badInch = 0;
+    if (!ReadSpecs(specs, &badInch)) {
+        QMessageBox::warning(this, "도면 스펙 확인 필요",
+                             QString("%1\" 인치의 도면 스펙 값이 숫자가 아닙니다 - 숫자로 고치거나 비워두세요.").arg(badInch));
+        return false;
     }
     return true;
 }
@@ -1100,28 +1300,6 @@ void RuleEditorDialog::AddPoint(const PointEntry& entry) {
     RefreshMarkers();
 }
 
-void RuleEditorDialog::onSearchPointClicked() {
-    if (points_.size() >= 2) {
-        QMessageBox::information(
-            this, "추가 불가",
-            "포인트는 최대 2개까지 추가할 수 있습니다 - 이미 2개가 있습니다. \"선택 포인트 삭제\"로 지우고 "
-            "다시 시도하세요.");
-        return;
-    }
-    AnchorSearchDialog dialog(adapter_, models_, this);
-    dialog.SetInitialCriteria("", "", 0.0);
-    if (dialog.exec() == QDialog::Accepted) {
-        PointEntry entry;
-        entry.type = dialog.AnchorType();
-        entry.partName = dialog.PartName();
-        entry.diameterMm = dialog.Diameter();
-        entry.directionAxis = CurrentDirectionFilter();
-        entry.kind = geometry::PickedFaceKind::Cylinder; // 검색(AnchorSearchDialog)은 원통만 다룸
-        entry.modelHandle = dialog.SelectedModelHandle();
-        AddPoint(entry);
-    }
-}
-
 void RuleEditorDialog::onAddPresetPointClicked() {
     if (points_.size() >= 2) {
         QMessageBox::information(
@@ -1162,6 +1340,9 @@ void RuleEditorDialog::onAddPresetPointClicked() {
             });
         entry.hasPosition = true;
         entry.position = best->position;
+        // § 클릭 기준 좌표 - 대표 인치에서 고른 이 위치를 기준으로 저장해두면, 같은 프리셋이
+        // 모델에 여러 개 있어도 엔진이 유사도 최고점이 아니라 "이 자리"의 것을 고른다.
+        entry.ref = rule::RefGeometry{best->position, std::nullopt, adapter_->GetBoundingBox(handle)};
     }
     AddPoint(entry);
 }
@@ -1210,7 +1391,8 @@ void RuleEditorDialog::onDeletePointClicked() {
     RefreshMarkers();
 }
 
-void RuleEditorDialog::onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir) {
+void RuleEditorDialog::onFacePicked(
+    geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir, bool /*shiftHeld*/) {
     if (!pickArmed_) {
         return; // 이 다이얼로그가 피킹을 요청한 상태가 아니면 무시.
     }
@@ -1258,9 +1440,20 @@ void RuleEditorDialog::onFacePicked(geometry::ModelHandle handle, QVector3D rayO
             case geometry::PointSubKind::Intersection: entry.type = "Intersection_Point"; break;
             default: entry.type = "Vertex"; break;
         }
+        // § 클릭 기준 좌표(2026-10-30) - 예전엔 여기서 주변 형상 지문을 떠서 이름 없는 프리셋으로
+        // 재검색했지만(위치가 꼭짓점이 아니라 패치 무게중심이 돼서 값이 틀렸음), 이제 엔진이
+        // 같은 종류의 점(FindPointCandidates)을 아래 entry.ref 좌표 근처에서 직접 찾는다.
     } else {
         entry.type = "Datum_Plane";
     }
+    // 클릭 좌표 + 평면 법선 + 이 모델의 bbox - 다른 인치에서 "그 자리"를 예측하는 기준.
+    rule::RefGeometry ref;
+    ref.position = result.point;
+    if (result.kind == geometry::PickedFaceKind::Plane) {
+        ref.normal = result.normal;
+    }
+    ref.sourceBox = adapter_->GetBoundingBox(handle);
+    entry.ref = ref;
     AddPoint(entry);
 
     // § "지정 누르면 연달아 포인트 2개" - 아직 1개뿐이면 사용자가 다시 버튼을 누를

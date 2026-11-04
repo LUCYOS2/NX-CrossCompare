@@ -18,6 +18,7 @@
 #include <BRepBuilderAPI_MakeVertex.hxx>
 #include <BRepExtrema_DistShapeShape.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepTools.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GCPnts_QuasiUniformDeflection.hxx>
@@ -28,7 +29,9 @@
 #include <STEPControl_Reader.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopLoc_Location.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
@@ -88,9 +91,148 @@ double BoundingDiagonal(const BoundingBox& box) {
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
 
+Vec3 ToVec3(const gp_Pnt& p) {
+    return Vec3{p.X(), p.Y(), p.Z()};
+}
+
+Vec3 ToVec3(const gp_Dir& d) {
+    return Vec3{d.X(), d.Y(), d.Z()};
+}
+
+// § 측정 재점검(2026-10-30) - 원통면의 대표점. gp_Cylinder의 V 파라미터는 축 방향 거리라서,
+// 면의 V 구간 중앙을 축 위에 찍으면 "그 원통면이 실제로 차지하는 구간의 한가운데"가 된다.
+// 예전엔 cylinder.Axis().Location()(STEP에 기록된 축 기준점 - 실제 구멍에서 수십 mm 떨어져
+// 있을 수 있음)을 그대로 써서 구멍 사이 3D 거리에 축 방향 어긋남이 섞였다. 클릭(PickFace)과
+// 엔진 검색(FindAnchorCandidates)이 이 함수를 같이 써야 같은 구멍이 같은 좌표로 나온다.
+gp_Pnt CylinderFaceCenter(const TopoDS_Face& face, const gp_Cylinder& cylinder) {
+    double uMin = 0.0;
+    double uMax = 0.0;
+    double vMin = 0.0;
+    double vMax = 0.0;
+    BRepTools::UVBounds(face, uMin, uMax, vMin, vMax);
+    const gp_Ax3& position = cylinder.Position();
+    return position.Location().Translated(gp_Vec(position.Direction()) * ((vMin + vMax) * 0.5));
+}
+
+// 면 방향(TopAbs_REVERSED)과 좌표계 손잡이(왼손 Ax3)까지 반영한 평면의 바깥쪽 법선 - 판재
+// 앞/뒷면처럼 같은 자리에서 마주보는 두 면을 부호로 구분하기 위해(rule::Matching 참고).
+gp_Dir OrientedPlaneNormal(const TopoDS_Face& face, const gp_Pln& plane) {
+    gp_Dir normal = plane.Axis().Direction();
+    if (!plane.Direct()) {
+        normal.Reverse();
+    }
+    if (face.Orientation() == TopAbs_REVERSED) {
+        normal.Reverse();
+    }
+    return normal;
+}
+
+BoundingBox FaceBoundingBox(const TopoDS_Face& face) {
+    Bnd_Box box;
+    BRepBndLib::Add(face, box);
+    if (box.IsVoid()) {
+        return BoundingBox{};
+    }
+    double xmin, ymin, zmin, xmax, ymax, zmax;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    return BoundingBox{Vec3{xmin, ymin, zmin}, Vec3{xmax, ymax, zmax}};
+}
+
+// 면 bbox 중심을 평면 위로 내린 점 - plane.Location()(STEP 기준점, 면 밖일 수 있음) 대신
+// 실제 면 근처의 대표점으로 쓴다.
+gp_Pnt FaceCenterOnPlane(const BoundingBox& faceBox, const gp_Pln& plane) {
+    const gp_Pnt boxCenter((faceBox.min.x + faceBox.max.x) * 0.5, (faceBox.min.y + faceBox.max.y) * 0.5,
+                           (faceBox.min.z + faceBox.max.z) * 0.5);
+    const gp_Vec normal(plane.Axis().Direction());
+    const double offset = gp_Vec(plane.Location(), boxCenter).Dot(normal);
+    return boxCenter.Translated(normal * -offset);
+}
+
+// § 교차점 탐색 공용(2026-10-30) - PickFace(커서 근처)와 FindPointCandidates(측정 엔진)가
+// 같은 근사로 교차점을 구해야 클릭한 좌표와 엔진이 다시 찾은 좌표가 일치한다.
+struct NearbyEdge {
+    TopoDS_Edge edge;
+    double first = 0.0;
+    double last = 0.0;
+};
+
+// 두 모서리를 촘촘히 샘플링해서 서로 가장 가까워지는 지점을 찾는다. 그 최소 거리가 아주
+// 작으면(실제로 만나거나 맞닿음) 두 샘플의 중점을 교차점으로 삼는다 - 정확한 곡선-곡선 교차
+// 계산(무거움) 대신 쓰는 실용적 근사.
+bool ApproxEdgeIntersection(const NearbyEdge& a, const NearbyEdge& b, gp_Pnt& out) {
+    constexpr int kIntersectionSampleCount = 24;
+    constexpr double kIntersectionTouchToleranceMm = 0.5;
+    BRepAdaptor_Curve curveA(a.edge);
+    BRepAdaptor_Curve curveB(b.edge);
+    double bestPairDist = std::numeric_limits<double>::max();
+    gp_Pnt bestPairMid;
+    for (int ia = 0; ia <= kIntersectionSampleCount; ++ia) {
+        const double ta = a.first + (a.last - a.first) * ia / kIntersectionSampleCount;
+        const gp_Pnt pa = curveA.Value(ta);
+        for (int ib = 0; ib <= kIntersectionSampleCount; ++ib) {
+            const double tb = b.first + (b.last - b.first) * ib / kIntersectionSampleCount;
+            const gp_Pnt pb = curveB.Value(tb);
+            const double d = pa.Distance(pb);
+            if (d < bestPairDist) {
+                bestPairDist = d;
+                bestPairMid = gp_Pnt((pa.X() + pb.X()) * 0.5, (pa.Y() + pb.Y()) * 0.5, (pa.Z() + pb.Z()) * 0.5);
+            }
+        }
+    }
+    if (bestPairDist > kIntersectionTouchToleranceMm) {
+        return false;
+    }
+    out = bestPairMid;
+    return true;
+}
+
 // § 형상 프리셋 - CaptureFeaturePatch의 clickPoint(월드 좌표)에서 가장 가까운 면을 찾는다.
 // 클릭 지점은 이미 뷰어 피킹(PickFace)으로 형상 표면 위에서 얻은 점이라 실제로는 거리가
 // 0에 매우 가깝다 - 전체 면을 순회하는 O(n) 비용은 클릭 1회당 일회성이라 허용.
+// § 하이라이트 공용 헬퍼(2026-09-18) - PickFace(면 하나)와 CaptureFeaturePatch(면 여러
+// 개짜리 패치)가 똑같이 "이 면의 캐시된 테셀레이션을 월드좌표 삼각형으로 변환해서
+// 하이라이트 목록에 이어붙이는" 로직을 쓴다 - PickFace에 원래 있던 코드를 재사용
+// 가능하게 빼낸 것뿐, 동작은 그대로.
+void AppendFaceTriangles(const TopoDS_Face& face, std::vector<Vec3>& out) {
+    TopLoc_Location location;
+    const Handle(Poly_Triangulation)& tri = BRep_Tool::Triangulation(face, location);
+    if (tri.IsNull()) {
+        return;
+    }
+    const gp_Trsf& trsf = location.Transformation();
+    const bool reversed = face.Orientation() == TopAbs_REVERSED;
+    out.reserve(out.size() + static_cast<size_t>(tri->NbTriangles()) * 3);
+    for (int i = 1; i <= tri->NbTriangles(); ++i) {
+        int i1, i2, i3;
+        tri->Triangle(i).Get(i1, i2, i3);
+        if (reversed) {
+            std::swap(i1, i3);
+        }
+        const gp_Pnt p1 = tri->Node(i1).Transformed(trsf);
+        const gp_Pnt p2 = tri->Node(i2).Transformed(trsf);
+        const gp_Pnt p3 = tri->Node(i3).Transformed(trsf);
+        out.push_back(Vec3{p1.X(), p1.Y(), p1.Z()});
+        out.push_back(Vec3{p2.X(), p2.Y(), p2.Z()});
+        out.push_back(Vec3{p3.X(), p3.Y(), p3.Z()});
+    }
+}
+
+// § 형상 프리셋 수동 선택(2026-09-18) - 인덱스는 TopExp_Explorer(shape, TopAbs_FACE) 순회
+// 순서 기준. 모델(shape)이 바뀌지 않는 한 항상 같은 순서라 안정적인 키로 쓸 수 있다.
+bool GetFaceByIndex(const TopoDS_Shape& shape, int index, TopoDS_Face& outFace) {
+    if (index < 0) {
+        return false;
+    }
+    int i = 0;
+    for (TopExp_Explorer faceExp(shape, TopAbs_FACE); faceExp.More(); faceExp.Next(), ++i) {
+        if (i == index) {
+            outFace = TopoDS::Face(faceExp.Current());
+            return true;
+        }
+    }
+    return false;
+}
+
 bool FindNearestFace(const TopoDS_Shape& shape, const gp_Pnt& point, TopoDS_Face& outFace) {
     const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
     double bestDist = std::numeric_limits<double>::max();
@@ -288,6 +430,10 @@ std::vector<AnchorCandidate> StepGeometryAdapter::FindAnchorCandidates(
         return candidates;
     }
 
+    // § 측정 재점검(2026-10-30) - STEP의 원통은 보통 반원통 면 2개로 나뉘어 있어 구멍 하나가
+    // 후보 2개(같은 중앙점/지름)로 잡혔다 - 개수(instance_count)가 2배로 나오고 같은 자리
+    // 후보가 겹쳐 "ambiguous"가 됐다. 중앙점과 지름이 같은 면은 하나로 합친다.
+    constexpr double kSameHoleToleranceMm = 0.01;
     for (TopExp_Explorer faceExp(model->shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
         const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
         BRepAdaptor_Surface surface(face, /*restrictTriangulation=*/false);
@@ -295,15 +441,35 @@ std::vector<AnchorCandidate> StepGeometryAdapter::FindAnchorCandidates(
             continue;
         }
         const gp_Cylinder cylinder = surface.Cylinder();
-        const gp_Ax1 axis = cylinder.Axis();
-        const gp_Pnt center = axis.Location();
-        const gp_Dir dir = axis.Direction();
         AnchorCandidate candidate{
-            anchorType, partName, Vec3{center.X(), center.Y(), center.Z()}, cylinder.Radius() * 2.0};
-        candidate.axis = Vec3{dir.X(), dir.Y(), dir.Z()};
+            anchorType, partName, ToVec3(CylinderFaceCenter(face, cylinder)), cylinder.Radius() * 2.0};
+        candidate.axis = ToVec3(cylinder.Axis().Direction());
         candidates.push_back(std::move(candidate));
     }
-    return candidates;
+    // TV 어셈블리는 원통 면이 수만 개라 전체 쌍 비교(O(n²))는 느리다 - x로 정렬해 두고 x 차이가
+    // 허용오차 안인 바로 앞 후보들만 비교한다.
+    std::sort(candidates.begin(), candidates.end(),
+              [](const AnchorCandidate& a, const AnchorCandidate& b) { return a.position.x < b.position.x; });
+    std::vector<AnchorCandidate> unique;
+    unique.reserve(candidates.size());
+    for (auto& c : candidates) {
+        bool duplicate = false;
+        for (auto it = unique.rbegin(); it != unique.rend() && c.position.x - it->position.x <= kSameHoleToleranceMm;
+             ++it) {
+            const double dy = c.position.y - it->position.y;
+            const double dz = c.position.z - it->position.z;
+            const double dx = c.position.x - it->position.x;
+            if (std::abs(c.diameterMm - it->diameterMm) <= kSameHoleToleranceMm &&
+                std::sqrt(dx * dx + dy * dy + dz * dz) <= kSameHoleToleranceMm) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (!duplicate) {
+            unique.push_back(std::move(c));
+        }
+    }
+    return unique;
 }
 
 std::vector<PlaneCandidate> StepGeometryAdapter::FindPlaneCandidates(
@@ -321,12 +487,14 @@ std::vector<PlaneCandidate> StepGeometryAdapter::FindPlaneCandidates(
             continue;
         }
         const gp_Pln plane = surface.Plane();
-        const gp_Pnt point = plane.Location();
-        const gp_Dir normal = plane.Axis().Direction();
-        candidates.push_back(PlaneCandidate{
-            planeType, partName,
-            Vec3{point.X(), point.Y(), point.Z()},
-            Vec3{normal.X(), normal.Y(), normal.Z()}});
+        PlaneCandidate candidate;
+        candidate.planeType = planeType;
+        candidate.partName = partName;
+        candidate.faceBox = FaceBoundingBox(face);
+        candidate.hasFaceBox = true;
+        candidate.pointOnPlane = ToVec3(FaceCenterOnPlane(candidate.faceBox, plane));
+        candidate.normal = ToVec3(OrientedPlaneNormal(face, plane));
+        candidates.push_back(std::move(candidate));
     }
     return candidates;
 }
@@ -375,11 +543,6 @@ PickResult StepGeometryAdapter::PickFace(
     // 모서리"만 따로 모아뒀다가 아래에서 교차점 탐색에 재사용한다(전체 모서리 쌍을
     // O(n²)로 비교하면 모델이 클 때 느려지므로, 커서 근방으로 후보를 좁힌다).
     constexpr double kNearbyEdgeToleranceRatio = 4.0; // 스냅 허용오차의 4배 - 교차점 탐색용 느슨한 반경
-    struct NearbyEdge {
-        TopoDS_Edge edge;
-        double first = 0.0;
-        double last = 0.0;
-    };
     std::vector<NearbyEdge> nearbyEdges;
 
     for (TopExp_Explorer edgeExp(model->shape, TopAbs_EDGE); edgeExp.More(); edgeExp.Next()) {
@@ -409,37 +572,14 @@ PickResult StepGeometryAdapter::PickFace(
         }
     }
 
-    // § 교차점 탐색 - 커서 근처(nearbyEdges, 보통 0~수 개)의 모서리 쌍만 촘촘히 샘플링해서
-    // 서로 가장 가까워지는 지점을 찾는다. 그 최소 거리가 아주 작으면(실제로 만나거나
-    // 맞닿음) 두 샘플의 중점을 교차점 후보로 삼는다 - 정확한 곡선-곡선 교차 계산(무거움)
-    // 대신 쓰는 실용적 근사. nearbyEdges로 후보를 미리 좁혀서 전체 모서리 쌍 비교
+    // § 교차점 탐색 - 커서 근처(nearbyEdges, 보통 0~수 개)의 모서리 쌍만 비교한다
+    // (ApproxEdgeIntersection 참고). nearbyEdges로 후보를 미리 좁혀서 전체 모서리 쌍 비교
     // (O(전체 모서리 수²))를 피한다.
-    constexpr int kIntersectionSampleCount = 24;
-    constexpr double kIntersectionTouchToleranceMm = 0.5;
     for (size_t a = 0; a < nearbyEdges.size(); ++a) {
-        BRepAdaptor_Curve curveA(nearbyEdges[a].edge);
         for (size_t b = a + 1; b < nearbyEdges.size(); ++b) {
-            BRepAdaptor_Curve curveB(nearbyEdges[b].edge);
-            double bestPairDist = std::numeric_limits<double>::max();
-            gp_Pnt bestPairMid;
-            for (int ia = 0; ia <= kIntersectionSampleCount; ++ia) {
-                const double ta = nearbyEdges[a].first +
-                    (nearbyEdges[a].last - nearbyEdges[a].first) * ia / kIntersectionSampleCount;
-                const gp_Pnt pa = curveA.Value(ta);
-                for (int ib = 0; ib <= kIntersectionSampleCount; ++ib) {
-                    const double tb = nearbyEdges[b].first +
-                        (nearbyEdges[b].last - nearbyEdges[b].first) * ib / kIntersectionSampleCount;
-                    const gp_Pnt pb = curveB.Value(tb);
-                    const double d = pa.Distance(pb);
-                    if (d < bestPairDist) {
-                        bestPairDist = d;
-                        bestPairMid = gp_Pnt(
-                            (pa.X() + pb.X()) * 0.5, (pa.Y() + pb.Y()) * 0.5, (pa.Z() + pb.Z()) * 0.5);
-                    }
-                }
-            }
-            if (bestPairDist <= kIntersectionTouchToleranceMm) {
-                considerPoint(bestPairMid, PointSubKind::Intersection, nearbyEdges[a].edge);
+            gp_Pnt intersection;
+            if (ApproxEdgeIntersection(nearbyEdges[a], nearbyEdges[b], intersection)) {
+                considerPoint(intersection, PointSubKind::Intersection, nearbyEdges[a].edge);
             }
         }
     }
@@ -509,13 +649,12 @@ PickResult StepGeometryAdapter::PickFace(
     PickResult result;
     if (surface.GetType() == GeomAbs_Cylinder) {
         const gp_Cylinder cylinder = surface.Cylinder();
-        const gp_Pnt center = cylinder.Axis().Location();
         result.kind = PickedFaceKind::Cylinder;
-        result.point = Vec3{center.X(), center.Y(), center.Z()};
+        result.point = ToVec3(CylinderFaceCenter(bestFace, cylinder));
         result.diameterMm = cylinder.Radius() * 2.0;
     } else if (surface.GetType() == GeomAbs_Plane) {
         const gp_Pln plane = surface.Plane();
-        const gp_Dir normal = plane.Axis().Direction();
+        const gp_Dir normal = OrientedPlaneNormal(bestFace, plane);
         result.kind = PickedFaceKind::Plane;
         // § 라이브 호버 미리보기(2026-09-11) - 예전엔 plane.Location()(평면의 임의
         // 기준점 - 실제로 클릭한 위치와 무관하게 멀리 떨어져 있을 수 있음)을 썼는데,
@@ -532,29 +671,81 @@ PickResult StepGeometryAdapter::PickFace(
     // 같은 방식)을 그대로 재사용한다 - 다시 미소분할하지 않아 매 마우스 이동마다 호출돼도
     // 가볍다.
     if (result.kind != PickedFaceKind::None) {
-        TopLoc_Location location;
-        const Handle(Poly_Triangulation)& tri = BRep_Tool::Triangulation(bestFace, location);
-        if (!tri.IsNull()) {
-            const gp_Trsf& trsf = location.Transformation();
-            const bool reversed = bestFace.Orientation() == TopAbs_REVERSED;
-            result.highlightTriangles.reserve(static_cast<size_t>(tri->NbTriangles()) * 3);
-            for (int i = 1; i <= tri->NbTriangles(); ++i) {
-                int i1, i2, i3;
-                tri->Triangle(i).Get(i1, i2, i3);
-                if (reversed) {
-                    std::swap(i1, i3);
-                }
-                const gp_Pnt p1 = tri->Node(i1).Transformed(trsf);
-                const gp_Pnt p2 = tri->Node(i2).Transformed(trsf);
-                const gp_Pnt p3 = tri->Node(i3).Transformed(trsf);
-                result.highlightTriangles.push_back(Vec3{p1.X(), p1.Y(), p1.Z()});
-                result.highlightTriangles.push_back(Vec3{p2.X(), p2.Y(), p2.Z()});
-                result.highlightTriangles.push_back(Vec3{p3.X(), p3.Y(), p3.Z()});
-            }
-        }
+        AppendFaceTriangles(bestFace, result.highlightTriangles);
     }
 
     return result;
+}
+
+std::vector<AnchorCandidate> StepGeometryAdapter::FindPointCandidates(
+    ModelHandle handle, PointSubKind subKind, const Vec3& searchCenter, double radiusMm) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return {};
+    }
+    const gp_Pnt nearPnt(searchCenter.x, searchCenter.y, searchCenter.z);
+    std::vector<AnchorCandidate> candidates;
+    // 꼭짓점은 여러 모서리가 공유해서 같은 점이 반복해 나온다 - 아주 가까운 점은 하나로 합친다.
+    constexpr double kSamePointToleranceMm = 1e-3;
+    auto add = [&](const gp_Pnt& p) {
+        if (p.Distance(nearPnt) > radiusMm) {
+            return;
+        }
+        const bool duplicate = std::any_of(candidates.begin(), candidates.end(), [&](const AnchorCandidate& c) {
+            return p.Distance(gp_Pnt(c.position.x, c.position.y, c.position.z)) <= kSamePointToleranceMm;
+        });
+        if (!duplicate) {
+            AnchorCandidate candidate;
+            candidate.position = ToVec3(p);
+            candidates.push_back(std::move(candidate));
+        }
+    };
+
+    if (subKind == PointSubKind::Vertex || subKind == PointSubKind::StartPoint || subKind == PointSubKind::EndPoint) {
+        TopTools_IndexedMapOfShape vertices;
+        TopExp::MapShapes(model->shape, TopAbs_VERTEX, vertices);
+        for (int i = 1; i <= vertices.Extent(); ++i) {
+            add(BRep_Tool::Pnt(TopoDS::Vertex(vertices(i))));
+        }
+        return candidates;
+    }
+
+    // TopExp_Explorer는 공유 모서리를 면마다 반복해서 돌려주므로 고유 모서리 맵으로 한 번씩만 본다.
+    TopTools_IndexedMapOfShape edges;
+    TopExp::MapShapes(model->shape, TopAbs_EDGE, edges);
+    std::vector<NearbyEdge> nearbyEdges;
+    for (int i = 1; i <= edges.Extent(); ++i) {
+        const TopoDS_Edge& edge = TopoDS::Edge(edges(i));
+        double first = 0.0;
+        double last = 0.0;
+        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
+        if (curve.IsNull()) {
+            continue;
+        }
+        if (subKind == PointSubKind::EdgeMidpoint) {
+            add(curve->Value((first + last) * 0.5));
+        } else if (subKind == PointSubKind::Center) {
+            BRepAdaptor_Curve curveAdaptor(edge);
+            if (curveAdaptor.GetType() == GeomAbs_Circle) {
+                add(curveAdaptor.Circle().Location());
+            }
+        } else if (subKind == PointSubKind::Intersection) {
+            // PickFace와 같은 기준 - 모서리의 시작/끝/중간점 중 하나라도 탐색 반경 안이면 후보.
+            if (curve->Value(first).Distance(nearPnt) <= radiusMm || curve->Value(last).Distance(nearPnt) <= radiusMm ||
+                curve->Value((first + last) * 0.5).Distance(nearPnt) <= radiusMm) {
+                nearbyEdges.push_back({edge, first, last});
+            }
+        }
+    }
+    for (size_t a = 0; a < nearbyEdges.size(); ++a) {
+        for (size_t b = a + 1; b < nearbyEdges.size(); ++b) {
+            gp_Pnt intersection;
+            if (ApproxEdgeIntersection(nearbyEdges[a], nearbyEdges[b], intersection)) {
+                add(intersection);
+            }
+        }
+    }
+    return candidates;
 }
 
 std::vector<FaceCandidate> StepGeometryAdapter::FindFaceCandidates(
@@ -578,16 +769,12 @@ std::vector<FaceCandidate> StepGeometryAdapter::FindFaceCandidates(
         Vec3 normal;
         if (surface.GetType() == GeomAbs_Plane) {
             const gp_Pln plane = surface.Plane();
-            const gp_Pnt point = plane.Location();
-            const gp_Dir dir = plane.Axis().Direction();
-            center = {point.X(), point.Y(), point.Z()};
-            normal = {dir.X(), dir.Y(), dir.Z()};
+            center = ToVec3(FaceCenterOnPlane(FaceBoundingBox(face), plane));
+            normal = ToVec3(OrientedPlaneNormal(face, plane));
         } else if (surface.GetType() == GeomAbs_Cylinder) {
             const gp_Cylinder cylinder = surface.Cylinder();
-            const gp_Pnt point = cylinder.Location();
-            const gp_Dir dir = cylinder.Axis().Direction();
-            center = {point.X(), point.Y(), point.Z()};
-            normal = {dir.X(), dir.Y(), dir.Z()};
+            center = ToVec3(CylinderFaceCenter(face, cylinder));
+            normal = ToVec3(cylinder.Axis().Direction());
         } else {
             continue;
         }
@@ -617,6 +804,9 @@ FeaturePatchCapture StepGeometryAdapter::CaptureFeaturePatch(ModelHandle handle,
     capture.descriptor = ComputePatchDescriptor(patch);
     capture.position = PatchCentroid(patch);
     capture.valid = true;
+    for (const auto& face : patch) {
+        AppendFaceTriangles(face, capture.highlightTriangles);
+    }
     return capture;
 }
 
@@ -636,6 +826,97 @@ std::vector<PatchCandidate> StepGeometryAdapter::FindPatchCandidates(
         result.push_back(PatchCandidate{candidate.position, candidate.similarity});
     }
     return result;
+}
+
+int StepGeometryAdapter::PickFaceIndex(ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return -1;
+    }
+
+    const gp_Pnt origin(rayOrigin.x, rayOrigin.y, rayOrigin.z);
+    const gp_Dir dir(rayDir.x, rayDir.y, rayDir.z);
+    const gp_Lin line(origin, dir);
+
+    // PickFace의 면 폴백 구간과 같은 방식(정확한 광선-면 교차, 화면에서 실제로 보이는
+    // 가장 가까운 면) - 다만 여기서는 원통/평면 분류를 안 하고 인덱스만 필요하다 -
+    // 자유곡면(NURBS 등) 형상도 다뤄야 해서(스냅/후크류 실사용 형상 확인, 2026-09-18)
+    // PickFace처럼 Cylinder/Plane으로 걸러내지 않는다.
+    constexpr double kIntersectionTolerance = 1e-4;
+    double bestParam = std::numeric_limits<double>::max();
+    int bestIndex = -1;
+    int index = 0;
+    for (TopExp_Explorer faceExp(model->shape, TopAbs_FACE); faceExp.More(); faceExp.Next(), ++index) {
+        const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
+        IntCurvesFace_Intersector intersector(face, kIntersectionTolerance);
+        intersector.Perform(line, 0.0, std::numeric_limits<double>::max());
+        if (!intersector.IsDone()) {
+            continue;
+        }
+        for (int i = 1; i <= intersector.NbPnt(); ++i) {
+            const double w = intersector.WParameter(i);
+            if (w >= 0.0 && w < bestParam) {
+                bestParam = w;
+                bestIndex = index;
+            }
+        }
+    }
+    return bestIndex;
+}
+
+std::vector<Vec3> StepGeometryAdapter::GetFaceHighlightTriangles(ModelHandle handle, int faceIndex) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return {};
+    }
+    TopoDS_Face face;
+    if (!GetFaceByIndex(model->shape, faceIndex, face)) {
+        return {};
+    }
+    std::vector<Vec3> triangles;
+    AppendFaceTriangles(face, triangles);
+    return triangles;
+}
+
+int StepGeometryAdapter::GetFaceCount(ModelHandle handle) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return 0;
+    }
+    int count = 0;
+    for (TopExp_Explorer faceExp(model->shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
+        ++count;
+    }
+    return count;
+}
+
+FeaturePatchCapture StepGeometryAdapter::CaptureManualPatch(
+    ModelHandle handle, const std::vector<int>& faceIndices) const {
+    const auto* model = impl_->Find(handle);
+    if (!model || faceIndices.empty()) {
+        return FeaturePatchCapture{};
+    }
+
+    std::vector<TopoDS_Face> patch;
+    patch.reserve(faceIndices.size());
+    for (int idx : faceIndices) {
+        TopoDS_Face face;
+        if (GetFaceByIndex(model->shape, idx, face)) {
+            patch.push_back(face);
+        }
+    }
+    if (patch.empty()) {
+        return FeaturePatchCapture{};
+    }
+
+    FeaturePatchCapture capture;
+    capture.descriptor = ComputePatchDescriptor(patch);
+    capture.position = PatchCentroid(patch);
+    capture.valid = true;
+    for (const auto& face : patch) {
+        AppendFaceTriangles(face, capture.highlightTriangles);
+    }
+    return capture;
 }
 
 } // namespace geometry

@@ -13,6 +13,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QHeaderView>
+#include <QLabel>
 #include <QListWidget>
 #include <QMenu>
 #include <QMenuBar>
@@ -36,12 +37,19 @@
 #include "geometry/StepGeometryAdapter.h"
 #include "rule/BuiltInCatalog.h"
 #include "rule/RuleEngine.h"
-#include "ui/AnchorSearchDialog.h"
 #include "ui/ImportInchDialog.h"
 #include "ui/RuleEditorDialog.h"
+#include "ui/ShapePresetDialog.h"
 #include "viewer/MultiViewportPanel.h"
 
 namespace ui {
+
+namespace {
+// § 비교 테이블 컬럼 재구성(2026-09-12)/인치별 삭제(2026-09-18) - "규칙/포인트 부위/
+// 관리항목 종류/공차" 4칸 다음부터 인치별 측정값 열. refreshComparisonTable()과
+// onRuleHeaderClicked()가 같은 값을 써야 해서 파일 스코프로 뺐다.
+constexpr int kFixedColumnCount = 4;
+} // namespace
 
 MainWindow::MainWindow(QWidget* parent)
     // §17: STEP(.stp)을 OCCT로 직접 읽는 StepGeometryAdapter가 기본 경로. NX Open API
@@ -130,20 +138,38 @@ void MainWindow::setupMenuBar() {
     auto* importExportMenu = bar->addMenu("가져오기/내보내기");
     auto* importStepAction = importExportMenu->addAction("STEP(.stp) 파일 불러오기...");
     connect(importStepAction, &QAction::triggered, this, &MainWindow::onImportStepClicked);
+    // § 불러온 파일 관리(2026-09-18) - 비교 테이블 인치 헤더 클릭 삭제는 "인치 미지정"
+    // 상태인 파일(테이블에 열 자체가 안 생김, refreshComparisonTable이 inch<=0을
+    // 건너뜀)을 못 지운다는 사각지대가 있었다(사용자 리포트: 도면창엔 남아있는데 테이블만
+    // 바뀜). 인치 지정 여부와 무관하게 불러온 파일 전부를 보여주고 개별 삭제하는 창을
+    // 별도로 둔다.
+    auto* manageFilesAction = importExportMenu->addAction("불러온 파일 관리...");
+    connect(manageFilesAction, &QAction::triggered, this, &MainWindow::onManageLoadedFilesClicked);
 
     bar->addMenu("옵션");
 
-    // § 워크플로우(사용자 확인, 2026-09-08): 포인트 검색으로 형상을 먼저 확인 -> 규칙
-    // 관리(RuleEditorDialog)에서 그 조건 그대로 불러와 규칙을 만들거나 수정. "포인트
-    // 그룹"은 규칙 관리와 필드가 완전히 겹쳐서 폐기(대화 기록 참고) - 재사용은
-    // RuleEditorDialog의 포인트 A/B "검색..." 버튼이 대신한다.
-    auto* searchMenu = bar->addMenu("포인트 검색");
-    auto* searchAction = searchMenu->addAction("형상 검색...");
+    // § 형상 프리셋으로 전환(2026-09-18) - 예전 "포인트 검색"(AnchorSearchDialog,
+    // Hole/Boss_Center 텍스트+지름 검색)을 형상 프리셋(ShapePresetDialog)으로 완전히
+    // 대체했다. 원통도 프리셋으로 등록해서 쓸 수 있는 상위 호환이라 별도로 둘 이유가
+    // 없다는 사용자 판단 - RuleEditorDialog의 "프리셋으로 추가..." 버튼과 같은 창을
+    // 여기서는 규칙에 묶지 않고 미리 등록/관리하는 용도로 연다.
+    auto* searchMenu = bar->addMenu("형상 프리셋");
+    auto* searchAction = searchMenu->addAction("형상 프리셋 관리...");
     connect(searchAction, &QAction::triggered, this, &MainWindow::onSearchAnchorsClicked);
 
     auto* ruleMenu = bar->addMenu("규칙 관리");
     auto* addRuleAction = ruleMenu->addAction("+ 새 규칙 추가");
     connect(addRuleAction, &QAction::triggered, this, &MainWindow::onAddRuleClicked);
+}
+
+std::vector<int> MainWindow::LoadedInches() const {
+    std::vector<int> inches;
+    for (const auto& entry : inchFiles_) {
+        if (entry.inch > 0) {
+            inches.push_back(entry.inch);
+        }
+    }
+    return inches;
 }
 
 std::vector<std::pair<std::string, geometry::ModelHandle>> MainWindow::BuildLoadedModelList() const {
@@ -171,6 +197,7 @@ void MainWindow::setupCentralViewer() {
     // 들고 있으면 댕글링되므로 새 모델 목록으로 내장 패널을 다시 만들게 한다.
     if (activeRuleDialog_) {
         activeRuleDialog_->RewireModels(BuildLoadedModelList());
+        activeRuleDialog_->SetAvailableInches(LoadedInches());
     }
 }
 
@@ -240,15 +267,16 @@ void MainWindow::refreshComparisonTable() {
     // 인치들 쭉 나열하면 될 것 같다"는 요청. 예전엔 "규칙" 다음 바로 인치 값들이었는데,
     // 규칙 관리에서 입력한 CTQ 코드(Point 부위)/종류/공차가 화면에서 전혀 안 보였다.
     // 고정 4칸(규칙/포인트 부위/관리항목 종류/공차) 다음에 인치별 측정값을 그대로 붙인다.
-    constexpr int kFixedColumnCount = 4;
     comparisonTable_->clear();
     comparisonTable_->setRowCount(static_cast<int>(rules.size()));
     comparisonTable_->setColumnCount(kFixedColumnCount + static_cast<int>(handlesByInch.size()));
 
     QStringList headers;
     headers << "규칙 ▾" << "포인트(부위)" << "관리항목 종류" << "공차"; // 헤더 클릭 힌트는 규칙 칸에만
+    comparisonInchColumns_.clear();
     for (const auto& [inch, handle] : handlesByInch) {
-        headers << ui::FormatInchLabel(inch);
+        headers << (ui::FormatInchLabel(inch) + " ▾"); // 클릭하면 이 인치를 삭제할 수 있음
+        comparisonInchColumns_.push_back(inch);
     }
     comparisonTable_->setHorizontalHeaderLabels(headers);
 
@@ -281,10 +309,31 @@ void MainWindow::refreshComparisonTable() {
             continue;
         }
 
+        // § 인치별 판정 표시(2026-10-30) - 인치마다 따로: 매칭 실패는 회색 "실패"(사유는 툴팁),
+        // 도면 스펙이 있으면 진한 초록/빨강(도면 합격/불합격), 없으면 옅은 색(가장 작은 인치 대비
+        // 비교일 뿐 도면 판정이 아님)으로 구분한다.
         for (size_t col = 0; col < results.size(); ++col) {
             const auto& result = results[col];
-            auto* item = new QTableWidgetItem(QString::number(result.value, 'f', 3));
-            item->setBackground(QBrush(result.withinTolerance ? QColor(200, 255, 200) : QColor(255, 200, 200)));
+            QTableWidgetItem* item = nullptr;
+            if (!result.ok) {
+                item = new QTableWidgetItem("실패");
+                item->setBackground(QBrush(QColor(220, 220, 220)));
+                item->setToolTip(QString("측정 실패: %1").arg(QString::fromStdString(result.error)));
+            } else if (result.spec.has_value()) {
+                item = new QTableWidgetItem(QString::number(result.value, 'f', 3));
+                item->setBackground(QBrush(result.withinTolerance ? QColor(150, 230, 150) : QColor(255, 150, 150)));
+                item->setToolTip(QString("도면 스펙 %1 / 편차 %2%3 mm → %4")
+                                     .arg(*result.spec, 0, 'f', 3)
+                                     .arg(result.deviation >= 0.0 ? "+" : "")
+                                     .arg(result.deviation, 0, 'f', 3)
+                                     .arg(result.withinTolerance ? "합격" : "불합격"));
+            } else {
+                item = new QTableWidgetItem(QString::number(result.value, 'f', 3));
+                item->setBackground(QBrush(result.withinTolerance ? QColor(225, 250, 225) : QColor(255, 225, 225)));
+                item->setToolTip(QString("도면 스펙 없음 - 가장 작은 인치 대비 편차 %1%2 mm (도면 판정 아님)")
+                                     .arg(result.deviation >= 0.0 ? "+" : "")
+                                     .arg(result.deviation, 0, 'f', 3));
+            }
             comparisonTable_->setItem(rowIdx, kFixedColumnCount + static_cast<int>(col), item);
         }
         lastReports_.push_back(report::RuleReport{r.name, results, r.imagePath, r.ctqCode,
@@ -302,6 +351,35 @@ void MainWindow::refreshComparisonTable() {
 }
 
 void MainWindow::onRuleHeaderClicked(int section) {
+    // § 인치별 삭제(2026-09-18) - "불러오기한 도면들 칸 각각 삭제 가능하게 해줘" 요청.
+    // 인치 열 헤더(4번째 칸부터)를 클릭하면 확인 후 그 인치를 목록에서 뺀다 - "규칙" 열
+    // (section==0)의 표시/숨김 토글과 같은 "헤더 클릭 = 그 열 관리" 패턴을 그대로 따른다.
+    if (section >= kFixedColumnCount) {
+        const int columnIndex = section - kFixedColumnCount;
+        if (columnIndex < 0 || columnIndex >= static_cast<int>(comparisonInchColumns_.size())) {
+            return;
+        }
+        const int inch = comparisonInchColumns_[static_cast<size_t>(columnIndex)];
+        const auto it = std::find_if(inchFiles_.begin(), inchFiles_.end(),
+                                      [inch](const LoadedInch& e) { return e.inch == inch; });
+        if (it == inchFiles_.end()) {
+            return;
+        }
+        const QString fileName = QFileInfo(QString::fromStdString(it->filePath)).fileName();
+        const auto answer = QMessageBox::question(
+            this, "인치 삭제",
+            QString("%1(%2)을(를) 목록에서 뺄까요? 뷰어/비교 테이블에서 사라집니다.")
+                .arg(ui::FormatInchLabel(inch))
+                .arg(fileName));
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+        inchFiles_.erase(it);
+        setupCentralViewer();
+        refreshComparisonTable();
+        return;
+    }
+
     if (section != 0) {
         return;
     }
@@ -352,6 +430,7 @@ void MainWindow::onAddRuleClicked() {
         return;
     }
     auto* dialog = new RuleEditorDialog(&db_, projectId_, adapter_.get(), BuildLoadedModelList(), this);
+    dialog->SetAvailableInches(LoadedInches());
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     activeRuleDialog_ = dialog;
     connect(dialog, &QObject::destroyed, this, [this]() { activeRuleDialog_ = nullptr; });
@@ -359,16 +438,116 @@ void MainWindow::onAddRuleClicked() {
     dialog->show();
 }
 
-// § 포인트 검색 - anchor_type(+부품명/지름)을 입력하면 현재 로드된 인치 중 하나를
-// 골라 실제 매칭 후보를 미리 보여준다. 아직 STEP을 하나도 안 불러왔으면 검색할
-// 대상이 없다는 뜻이라 바로 안내만 하고 다이얼로그를 열지 않는다.
+// § 형상 프리셋 - 뷰어에서 형상을 클릭해 캡처하고 이름 붙여 저장/관리한다(RuleEditorDialog
+// 없이도 미리 등록해둘 수 있게). 아직 STEP을 하나도 안 불러왔으면 등록할 대상이 없다는
+// 뜻이라 바로 안내만 하고 다이얼로그를 열지 않는다.
 void MainWindow::onSearchAnchorsClicked() {
     const auto models = BuildLoadedModelList();
     if (models.empty()) {
-        QMessageBox::information(this, "검색 대상 없음", "먼저 STEP 파일을 불러온 뒤 검색하세요.");
+        QMessageBox::information(this, "대상 없음", "먼저 STEP 파일을 불러온 뒤 이용하세요.");
         return;
     }
-    AnchorSearchDialog dialog(adapter_.get(), models, this);
+    ShapePresetDialog dialog(&db_, projectId_, adapter_.get(), models, this);
+    dialog.exec();
+}
+
+void MainWindow::onManageLoadedFilesClicked() {
+    if (inchFiles_.empty()) {
+        QMessageBox::information(this, "불러온 파일 없음", "아직 불러온 STEP 파일이 없습니다.");
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle("불러온 파일 관리");
+    dialog.resize(520, 360);
+    auto* layout = new QVBoxLayout(&dialog);
+
+    auto* table = new QTableWidget(&dialog);
+    table->setColumnCount(2);
+    table->setHorizontalHeaderLabels({"인치", "파일명"});
+    table->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
+    table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    // § 인치 재지정(2026-09-18) - "미지정을 다시 지정/수정할 수 있게 해달라"는 요청.
+    // 인치 칸만 더블클릭으로 편집 가능하게 하고(파일명은 그대로 읽기 전용), 숫자를
+    // 입력하면 그 자리에서 바로 반영한다.
+    table->setEditTriggers(QAbstractItemView::DoubleClicked);
+
+    bool populating = false; // populateTable() 안에서의 setItem이 itemChanged를 다시 부르지 않게.
+    auto populateTable = [&]() {
+        populating = true;
+        table->setRowCount(static_cast<int>(inchFiles_.size()));
+        for (size_t row = 0; row < inchFiles_.size(); ++row) {
+            const auto& entry = inchFiles_[row];
+            const int r = static_cast<int>(row);
+            const QString inchText = entry.inch > 0 ? QString::number(entry.inch) : QString();
+            auto* inchItem = new QTableWidgetItem(inchText);
+            inchItem->setFlags(inchItem->flags() | Qt::ItemIsEditable);
+            table->setItem(r, 0, inchItem);
+            auto* fileItem =
+                new QTableWidgetItem(QFileInfo(QString::fromStdString(entry.filePath)).fileName());
+            fileItem->setFlags(fileItem->flags() & ~Qt::ItemIsEditable);
+            table->setItem(r, 1, fileItem);
+        }
+        populating = false;
+    };
+    populateTable();
+    layout->addWidget(table);
+    layout->addWidget(new QLabel("인치 칸을 더블클릭해서 숫자를 입력/수정할 수 있습니다(비우면 미지정).", &dialog));
+
+    connect(table, &QTableWidget::itemChanged, &dialog, [&](QTableWidgetItem* item) {
+        if (populating || item->column() != 0) {
+            return;
+        }
+        const int row = item->row();
+        if (row < 0 || row >= static_cast<int>(inchFiles_.size())) {
+            return;
+        }
+        const QString text = item->text().trimmed();
+        int newInch = 0;
+        if (!text.isEmpty()) {
+            bool ok = false;
+            newInch = text.toInt(&ok);
+            if (!ok || newInch <= 0) {
+                QMessageBox::warning(&dialog, "잘못된 값", "인치는 양의 정수여야 합니다(비우면 미지정).");
+                populateTable();
+                return;
+            }
+        }
+        inchFiles_[static_cast<size_t>(row)].inch = newInch;
+        // onImportStepClicked와 같은 정렬 기준(미지정은 맨 뒤) - 인치 관계로 화면에서도
+        // 일관되게 소형->대형 순으로 보이게 한다.
+        std::stable_sort(inchFiles_.begin(), inchFiles_.end(), [](const LoadedInch& a, const LoadedInch& b) {
+            const int ka = a.inch <= 0 ? 100000 : a.inch;
+            const int kb = b.inch <= 0 ? 100000 : b.inch;
+            return ka < kb;
+        });
+        setupCentralViewer();
+        refreshComparisonTable();
+        populateTable();
+    });
+
+    auto* deleteButton = new QPushButton("선택 항목 삭제", &dialog);
+    layout->addWidget(deleteButton);
+    connect(deleteButton, &QPushButton::clicked, &dialog, [&]() {
+        const auto selected =
+            table->selectionModel() ? table->selectionModel()->selectedRows() : QModelIndexList();
+        if (selected.isEmpty()) {
+            return;
+        }
+        const int row = selected.front().row();
+        if (row < 0 || row >= static_cast<int>(inchFiles_.size())) {
+            return;
+        }
+        inchFiles_.erase(inchFiles_.begin() + row);
+        setupCentralViewer();
+        refreshComparisonTable();
+        populateTable();
+    });
+
+    auto* closeButtons = new QDialogButtonBox(QDialogButtonBox::Close, &dialog);
+    connect(closeButtons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(closeButtons);
+
     dialog.exec();
 }
 

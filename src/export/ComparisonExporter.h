@@ -14,8 +14,8 @@ namespace report {
 // ruleName + 측정값만 담아서 엑셀에서 어떤 부위를 찍었는지, 공차가 얼마인지, 측정방법이
 // 뭔지 전혀 알 수 없었다. rule::Rule 전체를 그대로 담기보다 CSV/엑셀에 실제로 필요한
 // 필드만 뽑아뒀다(Rule 쪽 필드가 늘어도 이 구조체를 매번 바꾸지 않도록).
-// "도면 스펙"은 사용자 확인 결과 별도 목표(nominal)값이 아니라 실측값(value_mm)을 그대로
-// 표시하는 것으로 확정됨 - InchResult::value를 그대로 쓴다(results에 이미 있음).
+// "도면 스펙"은 규칙의 인치별 도면 치수(= nominal, 같은 개념 - 2026-10-30 사용자 확인)로
+// InchResult::spec에, 실측값은 InchResult::value에 있다(results에 이미 있음).
 struct RuleReport {
     std::string ruleName;
     std::vector<rule::InchResult> results;

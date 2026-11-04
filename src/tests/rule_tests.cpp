@@ -114,11 +114,63 @@ void TestFindOrCreateProjectAndLoadRulesForProject() {
     Check(rulesForOther.size() == 1, "other project should have its own single rule");
 }
 
+// § 클릭 기준 좌표/도면 스펙(2026-10-30) - 저장 후 다시 불러와도 클릭 좌표(점/평면),
+// 평면 법선, 원본 bbox, 인치별 도면 스펙이 그대로 남아야 한다. UpdateRule 경로도 확인한다
+// (예전엔 UPDATE에서 check_point_category가 빠져 있었다).
+void TestRefGeometryAndSpecRoundTrip() {
+    database::Database db(":memory:");
+    db.EnsureSchema();
+    const int projectId = db.FindOrCreateProject("Default");
+
+    const geometry::BoundingBox box{geometry::Vec3{-600.5, -350.25, 0.0}, geometry::Vec3{600.5, 350.25, 45.125}};
+    rule::Rule r;
+    r.name = "후크 높이";
+    r.measurementType = rule::MeasurementType::PointToPlane;
+    r.projection = "normal";
+    r.referenceFrame = {"World_Origin"};
+    rule::Anchor point{"single", "Edge_Midpoint", "", std::nullopt, std::nullopt};
+    point.ref = rule::RefGeometry{geometry::Vec3{-590.123456789, 12.5, 30.0}, std::nullopt, box};
+    r.anchors = {point};
+    rule::PlaneRef plane{"Datum_Plane", ""};
+    plane.ref = rule::RefGeometry{geometry::Vec3{-580.0, 0.0, 0.0}, geometry::Vec3{0.0, 0.0, -1.0}, box};
+    r.referencePlane = plane;
+    r.specByInch = {{55, 8.5}, {65, 8.75}};
+    r.checkPointCategory = "Height";
+
+    const int ruleId = db.SaveRule(projectId, r);
+    const auto loaded = db.LoadRule(ruleId);
+    Check(loaded.anchors.size() == 1 && loaded.anchors[0].ref.has_value(), "anchor ref should round-trip");
+    if (!loaded.anchors.empty() && loaded.anchors[0].ref) {
+        const auto& ref = *loaded.anchors[0].ref;
+        Check(std::abs(ref.position.x - (-590.123456789)) < 1e-9, "anchor ref position should keep full precision");
+        Check(!ref.normal.has_value(), "point ref should have no normal");
+        Check(std::abs(ref.sourceBox.max.z - 45.125) < 1e-9, "anchor ref source box should round-trip");
+    }
+    Check(loaded.referencePlane && loaded.referencePlane->ref && loaded.referencePlane->ref->normal,
+          "plane ref with normal should round-trip");
+    if (loaded.referencePlane && loaded.referencePlane->ref && loaded.referencePlane->ref->normal) {
+        Check(std::abs(loaded.referencePlane->ref->normal->z + 1.0) < 1e-12, "plane normal sign should be kept");
+    }
+    Check(loaded.specByInch.size() == 2 && std::abs(loaded.specByInch.at(65) - 8.75) < 1e-12,
+          "per-inch drawing specs should round-trip");
+
+    auto updated = loaded;
+    updated.specByInch = {{75, 9.0}};
+    updated.checkPointCategory = "Gap";
+    db.UpdateRule(ruleId, updated);
+    const auto reloaded = db.LoadRule(ruleId);
+    Check(reloaded.specByInch.size() == 1 && reloaded.specByInch.count(75) == 1,
+          "UpdateRule should replace drawing specs, not append");
+    Check(reloaded.checkPointCategory == std::optional<std::string>("Gap"), "UpdateRule should save check point category");
+    Check(reloaded.anchors.size() == 1 && reloaded.anchors[0].ref.has_value(), "UpdateRule should keep anchor ref");
+}
+
 } // namespace
 
 int main() {
     TestRuleRoundTrip();
     TestFindOrCreateProjectAndLoadRulesForProject();
+    TestRefGeometryAndSpecRoundTrip();
 
     if (g_failures == 0) {
         std::printf("All rule/database tests passed.\n");

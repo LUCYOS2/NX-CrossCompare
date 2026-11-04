@@ -1,5 +1,7 @@
 #include "geometry/MockGeometryAdapter.h"
 #include "rule/BuiltInCatalog.h"
+#include "rule/Matching.h"
+#include "rule/Measure.h"
 #include "rule/RuleEngine.h"
 #include "rule/Selector.h"
 
@@ -234,6 +236,197 @@ void TestParallelFacePairRejectsNonAntiParallelCandidates() {
     }
 }
 
+// § 인치 간 자동 매칭(2026-10-30) 테스트용 어댑터 - 인치마다 bbox 크기가 다른 모델을 손으로
+// 구성한다. MockGeometryAdapter는 클릭 좌표/면 범위/점 후보 개념이 없어서 따로 둔다.
+class FakeAdapter : public geometry::IGeometryAdapter {
+public:
+    struct Model {
+        geometry::BoundingBox box;
+        std::vector<geometry::AnchorCandidate> holes;
+        std::vector<geometry::PlaneCandidate> planes;
+        std::vector<geometry::Vec3> vertices;
+    };
+
+    geometry::ModelHandle Add(Model model) {
+        models_.push_back(std::move(model));
+        return static_cast<geometry::ModelHandle>(models_.size() - 1);
+    }
+
+    geometry::ModelHandle LoadModel(const std::string&) override { return geometry::kInvalidModelHandle; }
+    geometry::BoundingBox GetBoundingBox(geometry::ModelHandle h) const override { return models_[h].box; }
+    std::vector<geometry::Vec3> GetVertices(geometry::ModelHandle) const override { return {}; }
+    std::vector<geometry::AnchorCandidate> FindAnchorCandidates(
+        geometry::ModelHandle h, const std::string& anchorType, const std::string&) const override {
+        return anchorType == "Hole" ? models_[h].holes : std::vector<geometry::AnchorCandidate>{};
+    }
+    std::vector<geometry::PlaneCandidate> FindPlaneCandidates(
+        geometry::ModelHandle h, const std::string&, const std::string&) const override {
+        return models_[h].planes;
+    }
+    std::vector<geometry::FaceCandidate> FindFaceCandidates(
+        geometry::ModelHandle, const std::string&, const std::string&) const override {
+        return {};
+    }
+    std::vector<geometry::AnchorCandidate> FindPointCandidates(
+        geometry::ModelHandle h, geometry::PointSubKind subKind, const geometry::Vec3& center,
+        double radiusMm) const override {
+        std::vector<geometry::AnchorCandidate> result;
+        if (subKind != geometry::PointSubKind::Vertex) {
+            return result;
+        }
+        for (const auto& v : models_[h].vertices) {
+            if (rule::ComputePointToPointDistance(v, center) <= radiusMm) {
+                geometry::AnchorCandidate c;
+                c.position = v;
+                result.push_back(c);
+            }
+        }
+        return result;
+    }
+
+private:
+    std::vector<Model> models_;
+};
+
+geometry::AnchorCandidate MakeHole(double x, double y, double z, double diameter) {
+    geometry::AnchorCandidate c;
+    c.anchorType = "Hole";
+    c.position = geometry::Vec3{x, y, z};
+    c.diameterMm = diameter;
+    c.axis = geometry::Vec3{0.0, 0.0, 1.0};
+    return c;
+}
+
+geometry::PlaneCandidate MakePlane(double z, double normalZ, double xMin, double xMax, double yHalf) {
+    geometry::PlaneCandidate p;
+    p.planeType = "Datum_Plane";
+    p.pointOnPlane = geometry::Vec3{(xMin + xMax) * 0.5, 0.0, z};
+    p.normal = geometry::Vec3{0.0, 0.0, normalZ};
+    p.faceBox = geometry::BoundingBox{geometry::Vec3{xMin, -yHalf, z}, geometry::Vec3{xMax, yHalf, z}};
+    p.hasFaceBox = true;
+    return p;
+}
+
+// 55"/65" 두 모델 - 왼쪽 외곽에서 10mm 안쪽의 구멍(Ø3)과, 그 옆 100mm 떨어진 같은 지름의 구멍
+// (오답 후보), 중앙 구멍 2개. 왼쪽 선반면(z=5, +Z)과 바닥면(z=0, -Z), 오른쪽 멀리 있는 다른
+// 높이의 면(z=10, +Z). 후크 끝 꼭짓점은 왼쪽 외곽에서 10mm, 높이 30.
+FakeAdapter::Model MakeChassis(double halfWidth, double halfHeight) {
+    FakeAdapter::Model m;
+    m.box = geometry::BoundingBox{geometry::Vec3{-halfWidth, -halfHeight, 0.0}, geometry::Vec3{halfWidth, halfHeight, 40.0}};
+    m.holes = {MakeHole(-halfWidth + 10.0, 0.0, 20.0, 3.0), MakeHole(-halfWidth + 10.0, 100.0, 20.0, 3.0),
+               MakeHole(0.0, 0.0, 20.0, 3.0), MakeHole(50.0, 0.0, 20.0, 3.0)};
+    m.planes = {MakePlane(0.0, -1.0, -halfWidth, halfWidth, halfHeight),
+                MakePlane(5.0, 1.0, -halfWidth, -halfWidth + 100.0, halfHeight),
+                MakePlane(10.0, 1.0, 0.0, 100.0, halfHeight)};
+    m.vertices = {geometry::Vec3{-halfWidth + 10.0, 0.0, 30.0}, geometry::Vec3{-halfWidth + 10.0, 3.0, 30.0}};
+    return m;
+}
+
+rule::RefGeometry Ref(double x, double y, double z, const geometry::BoundingBox& box,
+                      std::optional<geometry::Vec3> normal = std::nullopt) {
+    return rule::RefGeometry{geometry::Vec3{x, y, z}, normal, box};
+}
+
+void TestPredictPositionKeepsOffsetFromNearestReference() {
+    const geometry::BoundingBox small{geometry::Vec3{-600, -350, 0}, geometry::Vec3{600, 350, 40}};
+    const geometry::BoundingBox large{geometry::Vec3{-700, -400, 0}, geometry::Vec3{700, 400, 40}};
+    const auto nearLeft = rule::PredictPosition(geometry::Vec3{-590, 0, 20}, small, large);
+    Check(std::abs(nearLeft.x - (-690)) < 1e-9, "point near min X should keep its offset from min X");
+    Check(std::abs(nearLeft.y) < 1e-9, "point at center Y should stay at center Y");
+    const auto nearRight = rule::PredictPosition(geometry::Vec3{580, 340, 20}, small, large);
+    Check(std::abs(nearRight.x - 680) < 1e-9 && std::abs(nearRight.y - 390) < 1e-9,
+          "point near max X/Y should keep its offset from max X/Y");
+    const auto same = rule::PredictPosition(geometry::Vec3{123.4, -56.7, 8.9}, small, small);
+    Check(std::abs(same.x - 123.4) < 1e-9 && std::abs(same.y + 56.7) < 1e-9 && std::abs(same.z - 8.9) < 1e-9,
+          "same source and target box should return the clicked point unchanged");
+}
+
+void TestPickUniqueNearestRejectsAmbiguousAndFarCandidates() {
+    const auto never = [](std::size_t, std::size_t) { return false; };
+    const auto ok = rule::PickUniqueNearest({0.1, 8.0, 30.0}, never, 5.0);
+    Check(ok.index == std::optional<std::size_t>(0), "clear nearest candidate should be picked");
+    const auto ambiguous = rule::PickUniqueNearest({1.0, 1.5}, never, 5.0);
+    Check(!ambiguous.index && !ambiguous.error.empty(), "two similarly close candidates should be rejected");
+    const auto far = rule::PickUniqueNearest({7.0}, never, 5.0);
+    Check(!far.index, "nearest candidate outside the radius should be rejected");
+    const auto duplicates = rule::PickUniqueNearest(
+        {0.0, 0.01, 9.0}, [](std::size_t i, std::size_t j) { return i + j == 1; }, 5.0);
+    Check(duplicates.index.has_value(), "candidates marked as the same feature should not count as ambiguity");
+}
+
+void TestClickedHolesMatchAcrossInchesAndSpecJudgement() {
+    FakeAdapter adapter;
+    const auto h55 = adapter.Add(MakeChassis(600.0, 350.0));
+    const auto h65 = adapter.Add(MakeChassis(700.0, 400.0));
+    auto missing = MakeChassis(800.0, 450.0);
+    missing.holes.erase(missing.holes.begin()); // 75": 왼쪽 구멍이 없음 -> 이 인치만 실패해야 함
+    const auto h75 = adapter.Add(missing);
+    const geometry::BoundingBox box55 = adapter.GetBoundingBox(h55);
+
+    rule::Rule r;
+    r.name = "구멍 간 거리";
+    r.measurementType = rule::MeasurementType::PointToPoint;
+    r.projection = "3D";
+    rule::Anchor a{"A", "Hole", "", std::optional<std::string>("diameter"), std::optional<double>(3.0)};
+    a.ref = Ref(-590.0, 0.0, 20.0, box55);
+    rule::Anchor b{"B", "Hole", "", std::optional<std::string>("diameter"), std::optional<double>(3.0)};
+    b.ref = Ref(0.0, 0.0, 20.0, box55);
+    r.anchors = {a, b};
+    r.tolerancePlusMm = 0.3;
+    r.toleranceMinusMm = 0.3;
+    r.specByInch = {{55, 590.0}, {65, 690.5}};
+
+    const auto results = rule::RuleEngine::Evaluate(adapter, {{55, h55}, {65, h65}, {75, h75}}, r);
+    Check(results.size() == 3, "should report every inch even when one fails");
+    Check(results[0].ok && std::abs(results[0].value - 590.0) < 1e-9, "55\" should pick the clicked holes");
+    Check(results[0].withinTolerance && results[0].spec.has_value(), "55\" should pass against its drawing spec");
+    Check(results[1].ok && std::abs(results[1].value - 690.0) < 1e-9,
+          "65\" should follow the edge-relative hole, not scale or jump to the distractor");
+    Check(!results[1].withinTolerance && std::abs(results[1].deviation + 0.5) < 1e-9,
+          "65\" should fail against its own drawing spec (690.5 +/-0.3)");
+    Check(!results[2].ok && !results[2].error.empty(), "75\" with the hole missing should fail with a reason");
+}
+
+void TestClickedPlaneAndPointHeightAndGap() {
+    FakeAdapter adapter;
+    const auto h55 = adapter.Add(MakeChassis(600.0, 350.0));
+    const auto h65 = adapter.Add(MakeChassis(700.0, 400.0));
+    const geometry::BoundingBox box55 = adapter.GetBoundingBox(h55);
+
+    rule::Rule height;
+    height.name = "후크 높이";
+    height.measurementType = rule::MeasurementType::PointToPlane;
+    height.projection = "normal";
+    rule::Anchor tip{"single", "Vertex", "", std::nullopt, std::nullopt};
+    tip.ref = Ref(-590.0, 0.0, 30.0, box55);
+    height.anchors = {tip};
+    rule::PlaneRef shelf{"Datum_Plane", ""};
+    shelf.ref = Ref(-550.0, 0.0, 5.0, box55, geometry::Vec3{0.0, 0.0, 1.0});
+    height.referencePlane = shelf;
+    for (const auto& result : rule::RuleEngine::Evaluate(adapter, {{55, h55}, {65, h65}}, height)) {
+        Check(result.ok && std::abs(result.value - 25.0) < 1e-9,
+              "height should use the clicked shelf plane (z=5), not the first or a far plane");
+    }
+
+    rule::Rule gap;
+    gap.name = "선반-바닥 간격";
+    gap.measurementType = rule::MeasurementType::FaceToFaceGap;
+    rule::Anchor faceA{"A", "Datum_Plane", "", std::nullopt, std::nullopt};
+    faceA.ref = Ref(-550.0, 0.0, 5.0, box55, geometry::Vec3{0.0, 0.0, 1.0});
+    rule::Anchor faceB{"B", "Datum_Plane", "", std::nullopt, std::nullopt};
+    faceB.ref = Ref(-550.0, 0.0, 0.0, box55, geometry::Vec3{0.0, 0.0, -1.0});
+    gap.anchors = {faceA, faceB};
+    for (const auto& result : rule::RuleEngine::Evaluate(adapter, {{55, h55}, {65, h65}}, gap)) {
+        Check(result.ok && std::abs(result.value - 5.0) < 1e-9, "gap between the two clicked parallel planes");
+    }
+
+    rule::Rule legacy = height;
+    legacy.anchors[0].ref.reset();
+    const auto legacyResults = rule::RuleEngine::Evaluate(adapter, {{55, h55}}, legacy);
+    Check(!legacyResults[0].ok && legacyResults[0].error.find("다시 지정") != std::string::npos,
+          "clicked-point rule without stored coordinates should ask to re-pick, not guess");
+}
+
 } // namespace
 
 int main() {
@@ -256,6 +449,10 @@ int main() {
         {"TestWallThicknessRuleAcrossInches", TestWallThicknessRuleAcrossInches},
         {"TestOverallSizeRulesScaleWithInchExceptDepth", TestOverallSizeRulesScaleWithInchExceptDepth},
         {"TestParallelFacePairRejectsNonAntiParallelCandidates", TestParallelFacePairRejectsNonAntiParallelCandidates},
+        {"TestPredictPositionKeepsOffsetFromNearestReference", TestPredictPositionKeepsOffsetFromNearestReference},
+        {"TestPickUniqueNearestRejectsAmbiguousAndFarCandidates", TestPickUniqueNearestRejectsAmbiguousAndFarCandidates},
+        {"TestClickedHolesMatchAcrossInchesAndSpecJudgement", TestClickedHolesMatchAcrossInchesAndSpecJudgement},
+        {"TestClickedPlaneAndPointHeightAndGap", TestClickedPlaneAndPointHeightAndGap},
     };
     for (const auto& test : tests) {
         try {

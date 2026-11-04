@@ -34,13 +34,15 @@ void ExportComparisonCsv(const std::string& filePath, const std::vector<RuleRepo
     }
 
     // § 세로형(long) 컬럼 재구성 - "규칙/모델/인치/포인트(부위)/관리항목 종류/도면 스펙/
-    // 공차/측정방법"으로 정리해달라는 요청에 맞춰 헤더를 다시 짰다. "도면 스펙"은 목표
-    // (nominal)값이 아니라 실측값(value_mm) 그대로(사용자 확인 완료) - spec_mm이라는
-    // 이름은 Python 쪽 export_excel.py가 "도면 스펙" 헤더로 보여주기 위한 것뿐이다.
-    // within_tolerance는 8개 컬럼에는 없지만 Python이 셀 색상(공차 통과/실패)을 입히는 데
-    // 계속 필요해서 마지막에 덧붙였다.
+    // 공차/측정방법"으로 정리해달라는 요청에 맞춰 헤더를 다시 짰다.
+    // § 도면 스펙 = nominal(2026-10-30, 사용자 확인) - 예전엔 규칙에 도면 치수가 없어서 spec_mm에
+    // 실측값을 넣었지만, 이제 규칙의 인치별 도면 스펙(Rule::specByInch)을 넣고 실측값은 value_mm로
+    // 따로 둔다. 도면 스펙이 없는 인치는 spec_mm이 비고, 측정 실패한 인치는 value_mm/deviation_mm이
+    // 빈다. status: PASS/FAIL(도면 스펙 판정), COMPARE_PASS/COMPARE_FAIL(도면 스펙 없음 - 인치 간
+    // 비교), ERROR(측정 실패, 사유는 error). within_tolerance는 예전 CSV를 읽는 쪽 호환용.
     file << "rule,model,inch,ctq_code,check_point_category,spec_mm,tolerance_plus_mm,"
-            "tolerance_minus_mm,measurement_type,image_path,within_tolerance\n";
+            "tolerance_minus_mm,measurement_type,image_path,within_tolerance,"
+            "value_mm,deviation_mm,status,error\n";
     for (const auto& r : reports) {
         const std::string ctqCode = r.ctqCode.value_or("");
         const std::string category = r.checkPointCategory.value_or("");
@@ -48,17 +50,31 @@ void ExportComparisonCsv(const std::string& filePath, const std::vector<RuleRepo
         for (const auto& result : r.results) {
             const auto modelIt = modelNameByInch.find(result.inch);
             const std::string modelName = modelIt != modelNameByInch.end() ? modelIt->second : "";
+            const char* status = !result.ok              ? "ERROR"
+                                 : result.spec.has_value() ? (result.withinTolerance ? "PASS" : "FAIL")
+                                                              : (result.withinTolerance ? "COMPARE_PASS" : "COMPARE_FAIL");
             file << CsvQuote(r.ruleName) << ","
                  << CsvQuote(modelName) << ","
                  << result.inch << ","
                  << CsvQuote(ctqCode) << ","
-                 << CsvQuote(category) << ","
-                 << result.value << ","
+                 << CsvQuote(category) << ",";
+            if (result.spec.has_value()) {
+                file << *result.spec;
+            }
+            file << ","
                  << r.tolerancePlusMm << ","
                  << r.toleranceMinusMm << ","
                  << CsvQuote(r.measurementType) << ","
                  << CsvQuote(imagePath) << ","
-                 << (result.withinTolerance ? "TRUE" : "FALSE") << "\n";
+                 << (result.withinTolerance ? "TRUE" : "FALSE") << ",";
+            if (result.ok) {
+                file << result.value;
+            }
+            file << ",";
+            if (result.ok) {
+                file << result.deviation;
+            }
+            file << "," << status << "," << CsvQuote(result.error) << "\n";
         }
     }
 }

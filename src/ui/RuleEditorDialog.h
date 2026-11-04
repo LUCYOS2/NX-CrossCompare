@@ -9,6 +9,8 @@
 #include "rule/Rule.h"
 #include "viewer/MultiViewportPanel.h" // ModelViewport::CaptureInfo 필요
 
+#include <map>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -89,6 +91,10 @@ public:
     // 내장 패널을 통째로 새로 만들어 갈아끼운다(RebuildEditorPanel).
     void RewireModels(const std::vector<std::pair<std::string, geometry::ModelHandle>>& models);
 
+    // § 도면 스펙(2026-10-30) - 불러온 인치 목록. "4) 도면 스펙" 표의 행이 된다
+    // (models_의 표시 문자열에는 인치 숫자가 따로 없어서 MainWindow가 같이 넘겨준다).
+    void SetAvailableInches(const std::vector<int>& inches);
+
 signals:
     // 추가/수정/삭제가 즉시 DB에 반영된 뒤 쏜다 - MainWindow는 이걸 받아서 비교
     // 테이블만 새로 고치면 된다(비모달이라 exec() 반환을 기다릴 수 없어서 필요).
@@ -108,14 +114,15 @@ private slots:
     // "현재 화면 캡쳐"는 항목마다 다시 눌러야 함).
     void onSaveAsClicked();
     void onDeleteClicked();
-    void onSearchPointClicked();
     // § 형상 프리셋(2026-09-18) - "프리셋으로 추가..." 버튼. ShapePresetDialog를 열어
     // 저장된 프리셋 중 하나를 고르게 하고, "preset:<이름>" anchor_type으로 포인트를
-    // 추가한다(원통이 아닌 Hook/Flange류 형상도 다른 인치에 자동 적용 가능하게).
+    // 추가한다(원통이 아닌 Hook/Flange류 형상도 다른 인치에 자동 적용 가능하게). 예전
+    // "검색으로 추가..."(AnchorSearchDialog, Hole/Boss_Center 텍스트 검색)를 완전히
+    // 대체한다 - 상위 호환이라 둘을 같이 둘 필요가 없다는 사용자 판단(2026-09-18).
     void onAddPresetPointClicked();
     void onPickPointClicked();
     void onDeletePointClicked();
-    void onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir);
+    void onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir, bool shiftHeld);
     void onCaptureRuleImageClicked();
     void onCaptureRegionClicked();
     void onCaptureRegionGrabbed(QPixmap pixmap, viewer::ModelViewport::CaptureInfo info);
@@ -126,10 +133,10 @@ protected:
     void closeEvent(QCloseEvent* event) override;
 
 private:
-    // 포인트 리스트의 한 행 - 클릭(피킹) 또는 검색으로 추가된 형상 하나.
+    // 포인트 리스트의 한 행 - 클릭(피킹) 또는 프리셋으로 추가된 형상 하나.
     // kind는 BuildRule()이 "이 항목이 anchor(점)인지 referencePlane(평면)인지"를
-    // 판단하는 데 쓴다 - 텍스트 검색으로 추가한 항목은 항상 Cylinder(AnchorSearchDialog가
-    // 원통만 다루므로), 기존 규칙을 불러온 항목은 어느 Rule 필드에서 왔는지로 정한다.
+    // 판단하는 데 쓴다 - 프리셋으로 추가한 항목은 항상 Point(onAddPresetPointClicked
+    // 참고), 기존 규칙을 불러온 항목은 어느 Rule 필드에서 왔는지로 정한다.
     struct PointEntry {
         std::string type;
         std::string partName;
@@ -151,12 +158,35 @@ private:
         // 바로 치수선이 그려진다.
         bool hasDimensionOffset = false;
         geometry::Vec3 dimensionOffsetPosition;
-        // § 리스트 항목 분류(2026-09-11) - "INCH(적용 인치)" 열에 쓴다. 클릭/검색 둘 다
+        // § 리스트 항목 분류(2026-09-11) - "INCH(적용 인치)" 열에 쓴다. 클릭/프리셋 둘 다
         // 어느 모델(인치)이 대상이었는지 알 수 있다(onFacePicked의 handle 인자,
-        // AnchorSearchDialog::SelectedModelHandle()). DB에서 불러온 포인트는 모델 정보가
+        // ShapePresetDialog::SelectedModelHandle()). DB에서 불러온 포인트는 모델 정보가
         // 없어(kInvalidModelHandle) INCH 열이 "-"로 남는다.
         geometry::ModelHandle modelHandle = geometry::kInvalidModelHandle;
+        // § 수동 피킹 자동 재검색(2026-09-18) - "지정(3D 클릭)으로 찍은 점은 다른
+        // 인치에서 다시 검색할 방법이 없어서 RuleEngine 평가가 항상 실패한다"는 버그
+        // 수정(kind==Point, 즉 Vertex/모서리 스냅류 - Hole/Boss_Center는 이미
+        // FindAnchorCandidates로 재검색되므로 대상 아님). 클릭 시점에 그 지점에서
+        // CaptureFeaturePatch로 지문을 같이 떠서 저장해두면, RuleEngine이 프리셋과
+        // 똑같은 FindPatchCandidates 경로로 다른 인치에서도 재검색할 수 있다. 저장할
+        // 때(BuildRule) 이름 없는 프리셋으로 DB에 자동 등록되고 anchor_type이
+        // "preset:__auto_..."로 바뀐다.
+        std::optional<geometry::FeaturePatchDescriptor> patchDescriptor;
+        // § 클릭 기준 좌표(2026-10-30) - 클릭(또는 프리셋 추가) 시점의 좌표/법선/모델 bbox.
+        // 그대로 rule::Anchor::ref / PlaneRef::ref로 저장돼 RuleEngine이 인치별 모델에서
+        // "그 자리"를 다시 찾는 데 쓴다. 위 position은 화면 표시용이라 미리보기 재검색으로
+        // 바뀔 수 있지만, 이 값은 다시 지정하기 전까지 바뀌지 않는다.
+        std::optional<rule::RefGeometry> ref;
     };
+
+    // PointEntry -> rule::Anchor / PlaneRef (DB 저장과 미리보기 매칭이 같은 변환을 쓴다).
+    static rule::Anchor MakeAnchor(const PointEntry& p, const std::string& role);
+    static rule::PlaneRef MakePlaneRef(const PointEntry& p);
+    // § 도면 스펙(2026-10-30) - availableInches_와 values(불러온 규칙의 도면 스펙)를 합쳐
+    // 인치별 입력 행을 다시 만든다. 빈 칸 = 그 인치는 도면 스펙 없음(비교 모드).
+    void RefreshSpecTable(const std::map<int, double>& values);
+    // 표에서 숫자로 읽히는 칸만 모은다. 숫자가 아닌 칸이 있으면 badInch에 그 인치를 넣고 false.
+    bool ReadSpecs(std::map<int, double>& out, int* badInch) const;
 
     void refreshTable();
     void refreshPointsTable();
@@ -166,6 +196,12 @@ private:
     bool ValidateFormForSave();
     rule::Rule BuildRule() const;
     void LoadRuleIntoForm(const rule::Rule& r);
+    // § 규칙 다시 열면 마커/치수선이 사라지는 버그 수정(2026-09-18) - LoadRuleIntoForm이
+    // points_를 채운 직후 호출. 좌표가 없는(hasPosition==false) 포인트를 현재 "대상 인치"
+    // 모델에서 다시 검색해(Hole/Boss_Center는 FindAnchorCandidates, 프리셋은
+    // FindPatchCandidates) 실제 좌표를 채운다 - RuleEngine이 평가 때 하는 재검색을
+    // 미리보기용으로 한 번 더 하는 것.
+    void ResolveLoadedPointPositions();
     // 새 포인트를 리스트에 추가 - 최대 2개까지(그 이상 필요한 측정 타입이 없음). 초과
     // 시도하면 안내만 하고 무시한다.
     void AddPoint(const PointEntry& entry);
@@ -261,6 +297,10 @@ private:
 
     QTableWidget* table_; // 좌측 - 저장된 규칙 목록
 
+    // § 도면 스펙(2026-10-30) - 인치별 도면 치수 입력 표(열: 인치 / 도면 스펙 mm).
+    QTableWidget* specTable_ = nullptr;
+    std::vector<int> availableInches_;
+
     // § 대표 인치 선택(2026-09-11) - "여러 인치를 다 보여주니 화면이 헷갈리고, 어차피
     // 대표 인치 하나만 이미지로 쓸 거다"라는 피드백에 따라, 내장 뷰어는 이제 항상 이
     // 콤보에서 고른 인치 하나만 보여준다(editorViewerPanel_이 models_ 전체가 아니라
@@ -301,7 +341,6 @@ private:
     QTableWidget* pointsTable_; // "3) 관리 항목" - 지금 규칙(치수) 요약, 항상 1행
     QComboBox* nextPointDirection_;
     QPushButton* pickPointButton_;
-    QPushButton* searchPointButton_;
     QPushButton* presetPointButton_;
     QPushButton* deletePointButton_;
     QLabel* pickStatusLabel_;

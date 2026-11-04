@@ -52,6 +52,63 @@ geometry::FeaturePatchDescriptor DeserializeDescriptor(const std::string& text) 
     return d;
 }
 
+// § 클릭 기준 좌표(2026-10-30) - rule::RefGeometry 직렬화. 지문과 같은 이유(외부 JSON
+// 라이브러리 없이)로 구분 텍스트를 쓴다: "px,py,pz|nx,ny,nz|minx,miny,minz,maxx,maxy,maxz".
+// 법선이 없으면(점/구멍 클릭) 가운데 칸을 비워둔다. 좌표 비교(0.05mm 단위)에 쓰이므로
+// 정밀도를 넉넉히 남긴다.
+std::string SerializeRef(const rule::RefGeometry& ref) {
+    std::ostringstream oss;
+    oss.precision(17);
+    oss << ref.position.x << ',' << ref.position.y << ',' << ref.position.z << '|';
+    if (ref.normal.has_value()) {
+        oss << ref.normal->x << ',' << ref.normal->y << ',' << ref.normal->z;
+    }
+    oss << '|' << ref.sourceBox.min.x << ',' << ref.sourceBox.min.y << ',' << ref.sourceBox.min.z << ','
+        << ref.sourceBox.max.x << ',' << ref.sourceBox.max.y << ',' << ref.sourceBox.max.z;
+    return oss.str();
+}
+
+// 콤마로 구분된 실수들을 읽는다. 개수가 다르면 nullopt.
+std::optional<std::vector<double>> ParseDoubles(const std::string& text, size_t expectedCount) {
+    std::vector<double> values;
+    std::istringstream iss(text);
+    std::string token;
+    while (std::getline(iss, token, ',')) {
+        values.push_back(std::stod(token));
+    }
+    if (values.size() != expectedCount) {
+        return std::nullopt;
+    }
+    return values;
+}
+
+std::optional<rule::RefGeometry> DeserializeRef(const std::string& text) {
+    std::istringstream iss(text);
+    std::string positionPart;
+    std::string normalPart;
+    std::string boxPart;
+    if (!std::getline(iss, positionPart, '|') || !std::getline(iss, normalPart, '|') ||
+        !std::getline(iss, boxPart, '|')) {
+        return std::nullopt;
+    }
+    const auto position = ParseDoubles(positionPart, 3);
+    const auto box = ParseDoubles(boxPart, 6);
+    if (!position || !box) {
+        return std::nullopt;
+    }
+    rule::RefGeometry ref;
+    ref.position = geometry::Vec3{(*position)[0], (*position)[1], (*position)[2]};
+    ref.sourceBox = geometry::BoundingBox{geometry::Vec3{(*box)[0], (*box)[1], (*box)[2]},
+                                          geometry::Vec3{(*box)[3], (*box)[4], (*box)[5]}};
+    if (!normalPart.empty()) {
+        const auto normal = ParseDoubles(normalPart, 3);
+        if (normal) {
+            ref.normal = geometry::Vec3{(*normal)[0], (*normal)[1], (*normal)[2]};
+        }
+    }
+    return ref;
+}
+
 // anchor_type이 "preset:<이름>"이면 그 이름을 반환하고, 아니면 nullopt.
 std::optional<std::string> ExtractPresetName(const std::string& anchorType) {
     constexpr const char* kPrefix = "preset:";
@@ -170,6 +227,15 @@ CREATE TABLE IF NOT EXISTS shape_presets (
     dim_filter_kind TEXT,      -- 'diameter' | 'height' | 'width' | NULL(필터 안 씀)
     dim_filter_value_mm REAL
 );
+
+-- § 도면 스펙(2026-10-30) - 인치(사이즈)별 도면 치수(= nominal, 같은 개념). 사이즈마다 값이 다를 수 있어
+-- rules 컬럼 하나가 아니라 자식 테이블로 둔다(rule::Rule::specByInch).
+CREATE TABLE IF NOT EXISTS rule_specs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id INTEGER NOT NULL REFERENCES rules(id),
+    inch INTEGER NOT NULL,
+    spec_mm REAL NOT NULL
+);
 )SQL";
 
 } // namespace
@@ -223,6 +289,9 @@ void Database::EnsureSchema() {
     migrateColumn("ALTER TABLE rules ADD COLUMN ctq_code TEXT;");
     // rules.check_point_category - § Check Point 분류(2026-09-11).
     migrateColumn("ALTER TABLE rules ADD COLUMN check_point_category TEXT;");
+    // rule_anchors.ref_geometry / rules.plane_ref_geometry - § 클릭 기준 좌표(2026-10-30).
+    migrateColumn("ALTER TABLE rule_anchors ADD COLUMN ref_geometry TEXT;");
+    migrateColumn("ALTER TABLE rules ADD COLUMN plane_ref_geometry TEXT;");
 }
 
 int Database::CreateProject(const std::string& name) {
@@ -249,8 +318,8 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
         Stmt stmt(db_,
             "INSERT INTO rules (project_id, name, measurement_type, projection, "
             "tolerance_plus_mm, tolerance_minus_mm, plane_type, plane_part_name, image_path, "
-            "plane_normal_axis, plane_normal_tolerance_deg, ctq_code, check_point_category) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
+            "plane_normal_axis, plane_normal_tolerance_deg, ctq_code, check_point_category, plane_ref_geometry) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);");
         stmt.BindInt(1, projectId);
         stmt.BindText(2, r.name);
         stmt.BindText(3, ToString(r.measurementType));
@@ -286,35 +355,17 @@ int Database::SaveRule(int projectId, const rule::Rule& r) {
         } else {
             stmt.BindNull(13);
         }
+        if (r.referencePlane.has_value() && r.referencePlane->ref.has_value()) {
+            stmt.BindText(14, SerializeRef(*r.referencePlane->ref));
+        } else {
+            stmt.BindNull(14);
+        }
         stmt.Step();
         ruleId = static_cast<int>(stmt.LastInsertRowId());
     }
 
-    for (const auto& anchor : r.anchors) {
-        Stmt stmt(db_,
-            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value, "
-            "direction_axis, direction_tolerance_deg) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
-        stmt.BindInt(1, ruleId);
-        stmt.BindText(2, anchor.role);
-        stmt.BindText(3, anchor.anchorType);
-        stmt.BindText(4, anchor.partName);
-        if (anchor.paramKey.has_value()) {
-            stmt.BindText(5, *anchor.paramKey);
-            stmt.BindDouble(6, anchor.paramValue.value_or(0.0));
-        } else {
-            stmt.BindNull(5);
-            stmt.BindNull(6);
-        }
-        if (anchor.directionAxis.has_value()) {
-            stmt.BindText(7, *anchor.directionAxis);
-            stmt.BindDouble(8, anchor.directionToleranceDeg.value_or(rule::kDefaultDirectionToleranceDeg));
-        } else {
-            stmt.BindNull(7);
-            stmt.BindNull(8);
-        }
-        stmt.Step();
-    }
+    InsertAnchors(ruleId, r.anchors);
+    InsertSpecs(ruleId, r.specByInch);
 
     for (size_t i = 0; i < r.referenceFrame.size(); ++i) {
         Stmt stmt(db_,
@@ -346,7 +397,7 @@ rule::Rule Database::LoadRule(int ruleId) {
         Stmt stmt(db_,
             "SELECT name, measurement_type, projection, tolerance_plus_mm, tolerance_minus_mm, "
             "plane_type, plane_part_name, image_path, plane_normal_axis, plane_normal_tolerance_deg, ctq_code, "
-            "check_point_category, project_id "
+            "check_point_category, project_id, plane_ref_geometry "
             "FROM rules WHERE id = ?;");
         stmt.BindInt(1, ruleId);
         if (!stmt.Step()) {
@@ -366,6 +417,9 @@ rule::Rule Database::LoadRule(int ruleId) {
                 planeRef.normalAxis = stmt.ColumnText(8);
                 planeRef.normalToleranceDeg = stmt.ColumnDouble(9);
             }
+            if (!stmt.IsNull(13)) {
+                planeRef.ref = DeserializeRef(stmt.ColumnText(13));
+            }
             r.referencePlane = std::move(planeRef);
         }
         if (!stmt.IsNull(7)) {
@@ -382,7 +436,7 @@ rule::Rule Database::LoadRule(int ruleId) {
     {
         Stmt stmt(db_,
             "SELECT role, anchor_type, part_name, param_key, param_value, "
-            "direction_axis, direction_tolerance_deg "
+            "direction_axis, direction_tolerance_deg, ref_geometry "
             "FROM rule_anchors WHERE rule_id = ? ORDER BY id;");
         stmt.BindInt(1, ruleId);
         while (stmt.Step()) {
@@ -397,6 +451,9 @@ rule::Rule Database::LoadRule(int ruleId) {
             if (!stmt.IsNull(5)) {
                 anchor.directionAxis = stmt.ColumnText(5);
                 anchor.directionToleranceDeg = stmt.ColumnDouble(6);
+            }
+            if (!stmt.IsNull(7)) {
+                anchor.ref = DeserializeRef(stmt.ColumnText(7));
             }
             // § 형상 프리셋 - anchor_type이 "preset:<이름>"이면 같은 프로젝트의
             // shape_presets에서 지문을 찾아 채운다(RuleEngine이 이 필드로 원통/평면
@@ -432,7 +489,60 @@ rule::Rule Database::LoadRule(int ruleId) {
         }
     }
 
+    {
+        Stmt stmt(db_, "SELECT inch, spec_mm FROM rule_specs WHERE rule_id = ? ORDER BY inch;");
+        stmt.BindInt(1, ruleId);
+        while (stmt.Step()) {
+            r.specByInch[stmt.ColumnInt(0)] = stmt.ColumnDouble(1);
+        }
+    }
+
     return r;
+}
+
+// SaveRule/UpdateRule 공용 - 예전엔 두 함수에 같은 INSERT가 복사돼 있어서 컬럼을 추가할 때마다
+// 양쪽을 다 고쳐야 했다.
+void Database::InsertAnchors(int ruleId, const std::vector<rule::Anchor>& anchors) {
+    for (const auto& anchor : anchors) {
+        Stmt stmt(db_,
+            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value, "
+            "direction_axis, direction_tolerance_deg, ref_geometry) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);");
+        stmt.BindInt(1, ruleId);
+        stmt.BindText(2, anchor.role);
+        stmt.BindText(3, anchor.anchorType);
+        stmt.BindText(4, anchor.partName);
+        if (anchor.paramKey.has_value()) {
+            stmt.BindText(5, *anchor.paramKey);
+            stmt.BindDouble(6, anchor.paramValue.value_or(0.0));
+        } else {
+            stmt.BindNull(5);
+            stmt.BindNull(6);
+        }
+        if (anchor.directionAxis.has_value()) {
+            stmt.BindText(7, *anchor.directionAxis);
+            stmt.BindDouble(8, anchor.directionToleranceDeg.value_or(rule::kDefaultDirectionToleranceDeg));
+        } else {
+            stmt.BindNull(7);
+            stmt.BindNull(8);
+        }
+        if (anchor.ref.has_value()) {
+            stmt.BindText(9, SerializeRef(*anchor.ref));
+        } else {
+            stmt.BindNull(9);
+        }
+        stmt.Step();
+    }
+}
+
+void Database::InsertSpecs(int ruleId, const std::map<int, double>& specByInch) {
+    for (const auto& [inch, spec] : specByInch) {
+        Stmt stmt(db_, "INSERT INTO rule_specs (rule_id, inch, spec_mm) VALUES (?, ?, ?);");
+        stmt.BindInt(1, ruleId);
+        stmt.BindInt(2, inch);
+        stmt.BindDouble(3, spec);
+        stmt.Step();
+    }
 }
 
 std::vector<rule::Rule> Database::LoadRulesForProject(int projectId) {
@@ -484,7 +594,8 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
     Stmt stmt(db_,
         "UPDATE rules SET name = ?, measurement_type = ?, projection = ?, "
         "tolerance_plus_mm = ?, tolerance_minus_mm = ?, plane_type = ?, plane_part_name = ?, image_path = ?, "
-        "plane_normal_axis = ?, plane_normal_tolerance_deg = ?, ctq_code = ? "
+        "plane_normal_axis = ?, plane_normal_tolerance_deg = ?, ctq_code = ?, check_point_category = ?, "
+        "plane_ref_geometry = ? "
         "WHERE id = ?;");
     stmt.BindText(1, r.name);
     stmt.BindText(2, ToString(r.measurementType));
@@ -515,42 +626,31 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
     } else {
         stmt.BindNull(11);
     }
-    stmt.BindInt(12, ruleId);
+    // 예전엔 UPDATE에서 check_point_category가 빠져 있어 "수정 저장"하면 분류 변경이 반영되지
+    // 않았다(SaveRule에만 있었음) - 같이 고친다.
+    if (r.checkPointCategory.has_value() && !r.checkPointCategory->empty()) {
+        stmt.BindText(12, *r.checkPointCategory);
+    } else {
+        stmt.BindNull(12);
+    }
+    if (r.referencePlane.has_value() && r.referencePlane->ref.has_value()) {
+        stmt.BindText(13, SerializeRef(*r.referencePlane->ref));
+    } else {
+        stmt.BindNull(13);
+    }
+    stmt.BindInt(14, ruleId);
     stmt.Step();
 
     // 자식 테이블(anchor/reference_frame/selector)은 개수·순서가 통째로 바뀔 수 있어서
     // "지우고 다시 채우기"가 부분 UPDATE보다 훨씬 단순하고 실수가 적다 - SaveRule의
     // INSERT 로직을 그대로 재사용.
-    {
-        Stmt del(db_, "DELETE FROM rule_anchors WHERE rule_id = ?;");
+    for (const char* table : {"rule_anchors", "rule_specs"}) {
+        Stmt del(db_, std::string("DELETE FROM ") + table + " WHERE rule_id = ?;");
         del.BindInt(1, ruleId);
         del.Step();
     }
-    for (const auto& anchor : r.anchors) {
-        Stmt ins(db_,
-            "INSERT INTO rule_anchors (rule_id, role, anchor_type, part_name, param_key, param_value, "
-            "direction_axis, direction_tolerance_deg) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?);");
-        ins.BindInt(1, ruleId);
-        ins.BindText(2, anchor.role);
-        ins.BindText(3, anchor.anchorType);
-        ins.BindText(4, anchor.partName);
-        if (anchor.paramKey.has_value()) {
-            ins.BindText(5, *anchor.paramKey);
-            ins.BindDouble(6, anchor.paramValue.value_or(0.0));
-        } else {
-            ins.BindNull(5);
-            ins.BindNull(6);
-        }
-        if (anchor.directionAxis.has_value()) {
-            ins.BindText(7, *anchor.directionAxis);
-            ins.BindDouble(8, anchor.directionToleranceDeg.value_or(rule::kDefaultDirectionToleranceDeg));
-        } else {
-            ins.BindNull(7);
-            ins.BindNull(8);
-        }
-        ins.Step();
-    }
+    InsertAnchors(ruleId, r.anchors);
+    InsertSpecs(ruleId, r.specByInch);
 
     {
         Stmt del(db_, "DELETE FROM rule_reference_frames WHERE rule_id = ?;");
@@ -584,7 +684,7 @@ void Database::UpdateRule(int ruleId, const rule::Rule& r) {
 void Database::DeleteRule(int ruleId) {
     // FK 체크가 켜져 있지만(PRAGMA foreign_keys=ON) rule_anchors 등은 ON DELETE 규칙이
     // 없으므로 자식부터 직접 지운다.
-    for (const char* table : {"rule_anchors", "rule_reference_frames", "rule_selectors", "points"}) {
+    for (const char* table : {"rule_anchors", "rule_reference_frames", "rule_selectors", "points", "rule_specs"}) {
         Stmt stmt(db_, std::string("DELETE FROM ") + table + " WHERE rule_id = ?;");
         stmt.BindInt(1, ruleId);
         stmt.Step();

@@ -51,7 +51,15 @@ public:
 private slots:
     void onModelComboChanged();
     void onCaptureClicked();
-    void onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir);
+    // § 형상 프리셋 수동 선택(2026-09-18) - "자동 캡처가 원하는 형상과 다르게 잡힌다"는
+    // 피드백. 면을 하나씩 클릭해서 직접 고르는 모드(Shift+클릭=선택 해제).
+    void onManualSelectClicked();
+    void onFinishManualSelectClicked();
+    void onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir, bool shiftHeld);
+    // § 드래그 영역 다중 선택(2026-09-23) - "전체 덩어리를 드래그해서 선택"할 수 있게
+    // 해달라는 요청. onFacePicked(면 하나)와 같은 add/remove 규칙을 여러 면에 한 번에
+    // 적용한다.
+    void onFacesInRegionPicked(geometry::ModelHandle handle, std::vector<int> faceIndices, bool shiftHeld);
     void onFindSameModelClicked();
     void onSaveClicked();
     void onDeleteClicked();
@@ -61,6 +69,12 @@ private:
     void RebuildViewer();
     void RefreshPresetsTable();
     void ResetCaptureState();
+    // 자동 캡처/수동 완료 둘 다 결과(FeaturePatchCapture)를 똑같이 반영해야 해서 공용화.
+    void ApplyCapture(geometry::ModelHandle handle, const geometry::FeaturePatchCapture& capture);
+    void UpdateManualSelectionHighlight();
+    // shiftHeld==false면 manualSelectedFaces_에 없을 때만 추가, true면 있으면 제거 -
+    // 클릭 한 번(onFacePicked)과 드래그 영역(onFacesInRegionPicked) 양쪽이 공유.
+    void ToggleManualFace(int faceIndex, bool shiftHeld);
 
     database::Database* db_;
     int projectId_;
@@ -72,6 +86,8 @@ private:
     QWidget* viewerHost_ = nullptr; // viewerPanel_이 들어갈 레이아웃 자리(RebuildViewer가 교체)
 
     QPushButton* captureButton_ = nullptr;
+    QPushButton* manualSelectButton_ = nullptr;
+    QPushButton* finishManualSelectButton_ = nullptr;
     QLabel* captureStatusLabel_ = nullptr;
     QLineEdit* nameEdit_ = nullptr;
     QComboBox* dimFilterKindCombo_ = nullptr;
@@ -88,6 +104,11 @@ private:
     bool hasCapturedPatch_ = false;
     geometry::FeaturePatchDescriptor capturedDescriptor_;
     geometry::ModelHandle capturedHandle_ = geometry::kInvalidModelHandle;
+
+    // § 형상 프리셋 수동 선택 - manualSelectMode_ 동안은 클릭할 때마다 pickArmed_처럼
+    // 한 번 쓰고 꺼지는 게 아니라 계속 누적한다("선택 완료" 버튼을 눌러야 끝남).
+    bool manualSelectMode_ = false;
+    std::vector<int> manualSelectedFaces_;
 
     std::vector<database::ShapePresetSummary> presets_;
     std::optional<database::ShapePresetSummary> selectedPreset_;

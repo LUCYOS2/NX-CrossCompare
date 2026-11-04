@@ -49,12 +49,24 @@ public:
     // 재사용하므로, 여기서 나온 결과를 anchor_type/지름으로 그대로 옮겨써도 일관된다.
     PickResult PickFace(ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const override;
 
+    // § 측정 엔진 점 후보(2026-10-30) - PickFace의 포인트 스냅과 같은 계산(꼭짓점/중간점/원
+    // 중심/교차점)을 공용 헬퍼로 써서, 클릭 결과와 엔진 재검색 결과가 같은 좌표가 되게 한다.
+    std::vector<AnchorCandidate> FindPointCandidates(
+        ModelHandle handle, PointSubKind subKind, const Vec3& searchCenter, double radiusMm) const override;
+
     // § 형상 프리셋(2026-09-18) - IGeometryAdapter.h 주석 참고. clickPoint에 가장 가까운
     // 면(OCCT BRepExtrema_DistShapeShape)을 시드로 FeaturePatch.h의 패치 확장/지문 계산을
     // 실행한다.
     FeaturePatchCapture CaptureFeaturePatch(ModelHandle handle, const Vec3& clickPoint) const override;
     std::vector<PatchCandidate> FindPatchCandidates(
         ModelHandle handle, const FeaturePatchDescriptor& descriptor, double similarityThreshold) const override;
+
+    // § 형상 프리셋 수동 선택(2026-09-18) - IGeometryAdapter.h 주석 참고. 인덱스는
+    // TopExp_Explorer(shape, TopAbs_FACE) 순회 순서 기준(모델이 바뀌지 않는 한 고정).
+    int PickFaceIndex(ModelHandle handle, const Vec3& rayOrigin, const Vec3& rayDir) const override;
+    std::vector<Vec3> GetFaceHighlightTriangles(ModelHandle handle, int faceIndex) const override;
+    int GetFaceCount(ModelHandle handle) const override;
+    FeaturePatchCapture CaptureManualPatch(ModelHandle handle, const std::vector<int>& faceIndices) const override;
 
 private:
     struct Impl;

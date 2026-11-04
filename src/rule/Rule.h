@@ -2,11 +2,24 @@
 
 #include "geometry/IGeometryAdapter.h"
 
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace rule {
+
+// § 클릭 기준 좌표(2026-10-30) - "클릭한 위치가 규칙에 저장되지 않는다" 문제 해결. 예전엔
+// anchor_type/지름 같은 조건만 저장해서, 조건에 맞는 후보가 여럿이면 어느 것인지 알 수
+// 없었다(임의 선택 또는 ambiguous 실패). 클릭한 월드 좌표와 그때 모델의 바운딩박스를 같이
+// 저장해두면, 다른 인치 모델에서도 "그 자리"를 예측해 가장 가까운 후보를 고를 수 있다
+// (rule::PredictPosition - 크기가 다른 인치 모델은 같은 좌표가 아니므로 bbox 기준으로 옮김).
+struct RefGeometry {
+    geometry::Vec3 position;
+    // 평면을 클릭했을 때만 - 면 방향까지 반영한 바깥쪽 법선(판재 앞/뒷면 구분용).
+    std::optional<geometry::Vec3> normal;
+    geometry::BoundingBox sourceBox;
+};
 
 // 규칙에 등장하는 기준 지오메트리 하나. role은 "A"/"B"(두 anchor 비교) 또는
 // "single"(point_to_plane처럼 anchor가 하나뿐인 경우)로 구분한다.
@@ -27,6 +40,9 @@ struct Anchor {
     // Hole/Boss_Center처럼 anchorType 문자열 자체가 아니라 등록 시점에 캡처한 지문이
     // 필요해서 별도 필드로 들고 다닌다.
     std::optional<geometry::FeaturePatchDescriptor> patchDescriptor;
+    // 클릭으로 만든 anchor면 채워진다 - 있으면 selector(leftmost/nearest_pair 등) 대신 이
+    // 좌표 기준으로 후보를 고른다(RuleEngine). 예전에 저장된 규칙은 nullopt.
+    std::optional<RefGeometry> ref;
 };
 
 enum class MeasurementType {
@@ -71,6 +87,8 @@ struct PlaneRef {
     // 있음) 법선이 이 축과 평행한 것만 남긴다.
     std::optional<std::string> normalAxis;
     std::optional<double> normalToleranceDeg;
+    // § 클릭 기준 좌표 - 기준 평면을 클릭한 위치/법선. 없으면 예전처럼 첫 평면 후보를 쓴다.
+    std::optional<RefGeometry> ref;
 };
 
 // 개발계획_v2.md §7 Rule Schema. Anchor / Reference Frame / Selector / Measurement 4계층.
@@ -95,6 +113,12 @@ struct Rule {
     // § Check Point 분류(2026-09-11) - "Dimension/Height/Angle 등으로 분류하자"는 요청.
     // 포인트별이 아니라 규칙(측정 항목) 전체에 하나만 붙는다(사용자 확인 완료).
     std::optional<std::string> checkPointCategory;
+    // § 도면 스펙(2026-10-30) - "합격/불합격 판정하려면 규칙에 도면 치수가 필요하고, 사이즈별로
+    // 값이 다르면 사이즈별 값도 필요하다"는 요청. 인치 -> 도면 스펙(mm). "도면 스펙"과 "nominal"은
+    // 같은 개념이다(사용자 확인, 2026-10-30) - 코드/화면/엑셀 모두 "도면 스펙(spec)"으로 통일한다.
+    // 값이 있는 인치는 |측정값 - 도면 스펙|을 tolerancePlusMm/toleranceMinusMm로 판정하고, 없는
+    // 인치는 예전처럼 "가장 작은 인치 대비 편차"로 비교만 한다(비교 모드 - RuleEngine 참고).
+    std::map<int, double> specByInch;
 };
 
 } // namespace rule
