@@ -23,6 +23,19 @@ if defined ENV_ERROR goto :failed
 call "%~dp0_build_env.bat" refresh
 if defined ENV_ERROR goto :failed
 
+rem CLEAN=1 (rebuild_app_clean.bat) deletes every compiled object first. Use it when
+rem the app crashes right after an update (e.g. "HEAP CORRUPTION DETECTED"): a build
+rem that failed half-way can leave objects compiled against old class layouts.
+if not "%CLEAN%"=="1" goto :build
+echo.
+echo Cleaning old build outputs ...
+"%CMAKE_EXE%" --build "%BUILD%" --target clean --config %CONFIG%
+if errorlevel 1 (
+    set "ENV_ERROR=Clean failed - see the messages above"
+    goto :failed
+)
+
+:build
 echo.
 echo Building (this can take several minutes the first time) ...
 "%CMAKE_EXE%" --build "%BUILD%" --config %CONFIG%

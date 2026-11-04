@@ -21,3 +21,7 @@ target_link_libraries(diag_shape_preset_pipeline PRIVATE geometry rule database)
 # § 측정 매칭 진단(2026-10-30) - 실제 STEP으로 클릭 좌표 매칭의 정답/실패/오답 개수를 센다.
 add_executable(diag_measure_matching diag_measure_matching.cpp)
 target_link_libraries(diag_measure_matching PRIVATE geometry rule)
+
+# § 뷰어 점검(2026-11-04) - 실제 STEP으로 뷰어를 띄워 조작 경로를 한 번씩 거친다(Debug 힙 검사용, 창이 뜸).
+add_executable(diag_viewer_smoke diag_viewer_smoke.cpp)
+target_link_libraries(diag_viewer_smoke PRIVATE viewer geometry Qt6::Widgets)
