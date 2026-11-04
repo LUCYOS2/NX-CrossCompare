@@ -36,6 +36,9 @@ rule_images/
 # 로컬 테스트용 STEP 샘플/스크린샷/동영상(2026-09-18) - 저장소에 안 올림, 로컬 검증 전용
 samples/
 
+# 매칭 진단 결과 로그(scripts/run_diag_matching.bat) - 실제 도면 정보가 담길 수 있어 저장소에 안 올림
+scripts/diag_logs/
+
 # Python
 __pycache__/
 *.pyc
