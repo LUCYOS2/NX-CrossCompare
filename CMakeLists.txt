@@ -26,16 +26,21 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets OpenGL)
 # NxCadCore(공유 모듈, TV_BitSam과 공유) - 북마크 open + Assembly/Geometry 요약 읽기.
 add_subdirectory(external/NxCadCore/CadImportModule/Core)
 
-# NxBackend(NX Open 의존)는 UGII_BASE_DIR이 잡혀있을 때만 빌드된다 - NX Command
-# Prompt에서 실행한 VS/터미널이 아니면 이 변수가 없어서 여기서 자동으로 건너뛴다.
-# geometry::NxJtGeometryAdapter가 이 라이브러리를 실제 북마크(.plmxml) 열기에 사용한다.
-if(DEFINED ENV{UGII_BASE_DIR})
-  message(STATUS "UGII_BASE_DIR found ($ENV{UGII_BASE_DIR}) - building NxBackend (real NX Open import).")
+# NxBackend(NX Open 의존) - geometry::NxJtGeometryAdapter가 실제 북마크(.plmxml) 열기에 쓴다.
+# § NX Open 보류(개발계획_v2.md §18) - 예전엔 UGII_BASE_DIR 환경변수만 있으면 자동으로 빌드했는데,
+# 회사PC처럼 NX는 설치돼 있지만(변수 있음) NX Open 개발용 헤더가 없는 PC에서 빌드 설정을 갱신하면
+# "NXOpen/Assemblies/Component.hxx를 찾을 수 없음"으로 빌드가 깨졌다(2026-11-04). 지금 앱은 STEP
+# 업로드(§17)만 쓰므로, NX Open 연동을 재개할 때만 -DNX_ENABLE_NXOPEN=ON으로 명시해서 켠다.
+option(NX_ENABLE_NXOPEN "NX Open 연동(NxBackend) 빌드 - §18 보류 중, 재개할 때만 ON + UGII_BASE_DIR 필요" OFF)
+if(NX_ENABLE_NXOPEN AND DEFINED ENV{UGII_BASE_DIR})
+  message(STATUS "NX_ENABLE_NXOPEN=ON, UGII_BASE_DIR=$ENV{UGII_BASE_DIR} - building NxBackend (real NX Open import).")
   add_subdirectory(external/NxCadCore/Shared)
   add_subdirectory(external/NxCadCore/CadImportModule/NxBackend)
   set(NX_OPEN_AVAILABLE ON)
 else()
-  message(STATUS "UGII_BASE_DIR not set - skipping NxBackend. Launch from NX Command Prompt to enable real bookmark import.")
+  if(NX_ENABLE_NXOPEN)
+    message(WARNING "NX_ENABLE_NXOPEN=ON but UGII_BASE_DIR is not set - skipping NxBackend. Launch from NX Command Prompt.")
+  endif()
   set(NX_OPEN_AVAILABLE OFF)
 endif()
 
