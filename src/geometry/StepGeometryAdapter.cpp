@@ -301,6 +301,114 @@ struct StepGeometryAdapter::Impl {
         mutable std::vector<std::pair<TopoDS_Face, BoundingBox>> faceBoxes;
         mutable std::unique_ptr<TopTools_IndexedDataMapOfShapeListOfShape> edgeFaceMap;
 
+        // § PickFace 가속(2026-11-04) - "형상 프리셋에서 렉/응답 없음" 리포트. PickFace가 호출마다 모든
+        // 모서리의 곡선을 다시 읽어 시작/끝/중간점과 원 중심을 계산했다. 모델이 안 바뀌는 한 같은 값이라
+        // 처음 쓸 때 한 번만 만든다(모서리는 중복 없이 - 면마다 같은 모서리를 다시 보지 않게).
+        struct EdgeSample {
+            TopoDS_Edge edge;
+            double first = 0.0;
+            double last = 0.0;
+            gp_Pnt start;
+            gp_Pnt end;
+            gp_Pnt mid;
+            bool isCircle = false;
+            gp_Pnt center;
+        };
+        mutable std::vector<EdgeSample> edgeSamples;
+        mutable bool edgeSamplesBuilt = false;
+
+        // § PickFace 가속(2026-11-04) - 광선을 따라 가장 먼저 맞는 면의 FaceBoxes() 인덱스(없으면 -1).
+        // 예전엔 모든 면마다 정밀 교차 계산기(IntCurvesFace_Intersector - 생성 자체가 무거움)를 만들었다.
+        // 이제 광선이 면 bbox를 지나가는 면만, bbox에 먼저 닿는 순서로 보고, 이미 찾은 교차점보다 bbox가
+        // 더 멀면 멈춘다. bbox는 면을 감싸므로 결과는 예전과 같다. hitPoint가 있으면 교차점을 채운다.
+        int NearestFaceAlongRay(const gp_Lin& line, gp_Pnt* hitPoint) const {
+            constexpr double kIntersectionTolerance = 1e-4;
+            const gp_Pnt& origin = line.Location();
+            const gp_Dir& dir = line.Direction();
+            const double o[3] = {origin.X(), origin.Y(), origin.Z()};
+            const double d[3] = {dir.X(), dir.Y(), dir.Z()};
+            const auto& boxes = FaceBoxes();
+            std::vector<std::pair<double, int>> rayFaces;
+            for (int index = 0; index < static_cast<int>(boxes.size()); ++index) {
+                const BoundingBox& box = boxes[static_cast<size_t>(index)].second;
+                const double lo[3] = {box.min.x, box.min.y, box.min.z};
+                const double hi[3] = {box.max.x, box.max.y, box.max.z};
+                double tEnter = 0.0;
+                double tExit = std::numeric_limits<double>::max();
+                bool hit = true;
+                for (int axis = 0; axis < 3 && hit; ++axis) {
+                    if (std::abs(d[axis]) < 1e-12) {
+                        hit = o[axis] >= lo[axis] - kIntersectionTolerance && o[axis] <= hi[axis] + kIntersectionTolerance;
+                        continue;
+                    }
+                    double t1 = (lo[axis] - kIntersectionTolerance - o[axis]) / d[axis];
+                    double t2 = (hi[axis] + kIntersectionTolerance - o[axis]) / d[axis];
+                    if (t1 > t2) {
+                        std::swap(t1, t2);
+                    }
+                    tEnter = std::max(tEnter, t1);
+                    tExit = std::min(tExit, t2);
+                    hit = tEnter <= tExit;
+                }
+                if (hit) {
+                    rayFaces.emplace_back(tEnter, index);
+                }
+            }
+            std::sort(rayFaces.begin(), rayFaces.end());
+
+            double bestParam = std::numeric_limits<double>::max();
+            int bestIndex = -1;
+            for (const auto& [tEnter, index] : rayFaces) {
+                if (bestIndex >= 0 && tEnter > bestParam) {
+                    break; // 이 뒤의 면들은 bbox부터 이미 찾은 교차점보다 멀다.
+                }
+                IntCurvesFace_Intersector intersector(boxes[static_cast<size_t>(index)].first, kIntersectionTolerance);
+                intersector.Perform(line, 0.0, std::numeric_limits<double>::max());
+                if (!intersector.IsDone()) {
+                    continue;
+                }
+                for (int i = 1; i <= intersector.NbPnt(); ++i) {
+                    const double w = intersector.WParameter(i);
+                    if (w >= 0.0 && w < bestParam) {
+                        bestParam = w;
+                        bestIndex = index;
+                        if (hitPoint) {
+                            *hitPoint = intersector.Pnt(i);
+                        }
+                    }
+                }
+            }
+            return bestIndex;
+        }
+
+        const std::vector<EdgeSample>& EdgeSamples() const {
+            if (!edgeSamplesBuilt) {
+                edgeSamplesBuilt = true;
+                TopTools_IndexedMapOfShape edges;
+                TopExp::MapShapes(shape, TopAbs_EDGE, edges);
+                edgeSamples.reserve(static_cast<size_t>(edges.Extent()));
+                for (int i = 1; i <= edges.Extent(); ++i) {
+                    const TopoDS_Edge& edge = TopoDS::Edge(edges(i));
+                    EdgeSample s;
+                    const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, s.first, s.last);
+                    if (curve.IsNull()) {
+                        continue; // 퇴화 엣지(degenerate, 예: 원뿔 꼭짓점) 등 실제 곡선이 없는 경우.
+                    }
+                    s.edge = edge;
+                    s.start = curve->Value(s.first);
+                    s.end = curve->Value(s.last);
+                    s.mid = curve->Value((s.first + s.last) * 0.5);
+                    BRepAdaptor_Curve curveAdaptor(edge);
+                    if (curveAdaptor.GetType() == GeomAbs_Circle) {
+                        s.isCircle = true;
+                        s.center = curveAdaptor.Circle().Location();
+                    }
+                    edgeSamples.push_back(s);
+                }
+            }
+            return edgeSamples;
+        }
+
         const std::vector<std::pair<TopoDS_Face, BoundingBox>>& FaceBoxes() const {
             if (faceBoxes.empty()) {
                 for (TopExp_Explorer faceExp(shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
@@ -611,30 +719,17 @@ PickResult StepGeometryAdapter::PickFace(
     constexpr double kNearbyEdgeToleranceRatio = 4.0; // 스냅 허용오차의 4배 - 교차점 탐색용 느슨한 반경
     std::vector<NearbyEdge> nearbyEdges;
 
-    for (TopExp_Explorer edgeExp(model->shape, TopAbs_EDGE); edgeExp.More(); edgeExp.Next()) {
-        const TopoDS_Edge& edge = TopoDS::Edge(edgeExp.Current());
-        double first = 0.0;
-        double last = 0.0;
-        const Handle(Geom_Curve) curve = BRep_Tool::Curve(edge, first, last);
-        if (curve.IsNull()) {
-            continue; // 퇴화 엣지(degenerate, 예: 원뿔 꼭짓점) 등 실제 곡선이 없는 경우.
+    // § PickFace 가속 - 모서리별 대표점은 모델별 캐시(Impl::LoadedModel::EdgeSamples)에서 읽는다.
+    const double nearTol = snapToleranceMm * kNearbyEdgeToleranceRatio;
+    for (const auto& s : model->EdgeSamples()) {
+        considerPoint(s.start, PointSubKind::StartPoint, s.edge);
+        considerPoint(s.end, PointSubKind::EndPoint, s.edge);
+        considerPoint(s.mid, PointSubKind::EdgeMidpoint, s.edge);
+        if (s.isCircle) {
+            considerPoint(s.center, PointSubKind::Center, s.edge);
         }
-        const gp_Pnt startPnt = curve->Value(first);
-        const gp_Pnt endPnt = curve->Value(last);
-        const gp_Pnt midPnt = curve->Value((first + last) * 0.5);
-        considerPoint(startPnt, PointSubKind::StartPoint, edge);
-        considerPoint(endPnt, PointSubKind::EndPoint, edge);
-        considerPoint(midPnt, PointSubKind::EdgeMidpoint, edge);
-
-        BRepAdaptor_Curve curveAdaptor(edge);
-        if (curveAdaptor.GetType() == GeomAbs_Circle) {
-            considerPoint(curveAdaptor.Circle().Location(), PointSubKind::Center, edge);
-        }
-
-        const double nearTol = snapToleranceMm * kNearbyEdgeToleranceRatio;
-        if (line.Distance(startPnt) <= nearTol || line.Distance(endPnt) <= nearTol ||
-            line.Distance(midPnt) <= nearTol) {
-            nearbyEdges.push_back({edge, first, last});
+        if (line.Distance(s.start) <= nearTol || line.Distance(s.end) <= nearTol || line.Distance(s.mid) <= nearTol) {
+            nearbyEdges.push_back({s.edge, s.first, s.last});
         }
     }
 
@@ -680,34 +775,13 @@ PickResult StepGeometryAdapter::PickFace(
     // 근처에 스냅할 점이 없으면 기존처럼 면 판별로 폴백.
     // 모델의 모든 면과 광선을 정확히 교차시켜(근사 없음), 광선을 따라 가장 먼저(=가장
     // 가까운) 맞는 면을 찾는다 - 여러 면이 겹쳐 보여도 화면에서 실제로 보이는 면이
-    // 뽑히도록 하기 위함(뒤에 가려진 면이 아니라).
-    constexpr double kIntersectionTolerance = 1e-4;
-    double bestParam = std::numeric_limits<double>::max();
-    TopoDS_Face bestFace;
+    // 뽑히도록 하기 위함(뒤에 가려진 면이 아니라). 실제 계산은 Impl::LoadedModel::NearestFaceAlongRay.
     gp_Pnt bestFacePoint;
-    bool found = false;
-
-    for (TopExp_Explorer faceExp(model->shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
-        const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
-        IntCurvesFace_Intersector intersector(face, kIntersectionTolerance);
-        intersector.Perform(line, 0.0, std::numeric_limits<double>::max());
-        if (!intersector.IsDone()) {
-            continue;
-        }
-        for (int i = 1; i <= intersector.NbPnt(); ++i) {
-            const double w = intersector.WParameter(i);
-            if (w >= 0.0 && w < bestParam) {
-                bestParam = w;
-                bestFace = face;
-                bestFacePoint = intersector.Pnt(i);
-                found = true;
-            }
-        }
-    }
-
-    if (!found) {
+    const int bestFaceIndex = model->NearestFaceAlongRay(line, &bestFacePoint);
+    if (bestFaceIndex < 0) {
         return PickResult{};
     }
+    const TopoDS_Face bestFace = model->FaceBoxes()[static_cast<size_t>(bestFaceIndex)].first;
 
     // 판별 기준은 FindAnchorCandidates/FindPlaneCandidates와 동일(GeomAbs_Cylinder/Plane) -
     // 클릭으로 얻은 결과와 텍스트 검색으로 얻은 결과가 같은 형상이면 같은 값이 나오게.
@@ -929,27 +1003,9 @@ int StepGeometryAdapter::PickFaceIndex(ModelHandle handle, const Vec3& rayOrigin
     // PickFace의 면 폴백 구간과 같은 방식(정확한 광선-면 교차, 화면에서 실제로 보이는
     // 가장 가까운 면) - 다만 여기서는 원통/평면 분류를 안 하고 인덱스만 필요하다 -
     // 자유곡면(NURBS 등) 형상도 다뤄야 해서(스냅/후크류 실사용 형상 확인, 2026-09-18)
-    // PickFace처럼 Cylinder/Plane으로 걸러내지 않는다.
-    constexpr double kIntersectionTolerance = 1e-4;
-    double bestParam = std::numeric_limits<double>::max();
-    int bestIndex = -1;
-    int index = 0;
-    for (TopExp_Explorer faceExp(model->shape, TopAbs_FACE); faceExp.More(); faceExp.Next(), ++index) {
-        const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
-        IntCurvesFace_Intersector intersector(face, kIntersectionTolerance);
-        intersector.Perform(line, 0.0, std::numeric_limits<double>::max());
-        if (!intersector.IsDone()) {
-            continue;
-        }
-        for (int i = 1; i <= intersector.NbPnt(); ++i) {
-            const double w = intersector.WParameter(i);
-            if (w >= 0.0 && w < bestParam) {
-                bestParam = w;
-                bestIndex = index;
-            }
-        }
-    }
-    return bestIndex;
+    // PickFace처럼 Cylinder/Plane으로 걸러내지 않는다. FaceBoxes()는 TopExp_Explorer 순회 순서 그대로라
+    // 인덱스가 GetFaceHighlightTriangles/CaptureManualPatch의 면 인덱스와 같다.
+    return model->NearestFaceAlongRay(line, nullptr);
 }
 
 std::vector<Vec3> StepGeometryAdapter::GetFaceHighlightTriangles(ModelHandle handle, int faceIndex) const {

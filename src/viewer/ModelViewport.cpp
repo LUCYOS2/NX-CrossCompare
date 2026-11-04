@@ -7,6 +7,7 @@
 #include <QPainter>
 #include <QRect>
 #include <QRubberBand>
+#include <QTimer>
 #include <QVector2D>
 #include <QVector3D>
 #include <QVector4D>
@@ -242,6 +243,14 @@ ModelViewport::ModelViewport(geometry::IGeometryAdapter* adapter, geometry::Mode
     setFocusPolicy(Qt::StrongFocus);
     setContextMenuPolicy(Qt::NoContextMenu); // 우클릭=회전이므로 컨텍스트 메뉴가 뜨면 안 됨
     setMouseTracking(true); // 버튼을 안 눌러도 마우스 위치를 추적 - H(섹션)가 클릭 없이 현재 커서 위치를 써야 함
+
+    // § 호버 미리보기 지연(2026-11-04) - "형상 프리셋에서 렉/응답 없음" 리포트. 큰 도면은 PickFace 한 번이
+    // 무거워서 마우스 이동 이벤트마다 계산하면 이벤트가 밀려 멈춘다. 마우스가 잠깐 멈췄을 때(마지막
+    // 이동 후 kHoverPickDelayMs) 한 번만 계산한다.
+    hoverPickTimer_ = new QTimer(this);
+    hoverPickTimer_->setSingleShot(true);
+    hoverPickTimer_->setInterval(kHoverPickDelayMs);
+    connect(hoverPickTimer_, &QTimer::timeout, this, &ModelViewport::updateHoverPick);
 }
 
 ModelViewport::~ModelViewport() {
@@ -1042,6 +1051,16 @@ void ModelViewport::mousePressEvent(QMouseEvent* event) {
         pickDragActive_ = true;
         return;
     }
+    // § 피킹 없는 사각형 선택(2026-11-04) - 형상 프리셋 대기 상태처럼 피킹 모드(마우스 이동마다 무거운
+    // 호버 계산)는 끄고 사각형 선택만 켜 둔 경우, Ctrl/Shift를 누른 채 누르면 사각형 드래그를 시작한다.
+    // 그냥 누르면 아래로 흘러가 예전처럼 회전/이동이다.
+    if (regionSelectModeActive_ && *regionSelectModeActive_ && event->button() == Qt::LeftButton &&
+        (event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier))) {
+        pickDragStart_ = event->pos();
+        pickDragActive_ = true;
+        regionOnlyDrag_ = true;
+        return;
+    }
 
     // § 치수선 드래그(2026-09-13) - "사용자가 드래그해서 위치 조정도 가능하게 해달라"는
     // 요청. 라벨(노란 박스)을 직접 클릭했을 때만 드래그를 시작한다 - 카메라 잠금 여부와
@@ -1081,7 +1100,7 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
 
     // 마우스 매핑: 좌클릭=회전, 우클릭=팬, 중클릭=단면 위치 지정, 휠=줌(wheelEvent).
     // 독립 조작 모드(§ 화면설정)면 sharedCamera_가 아니라 이 뷰포트의 localCamera_만 바뀐다.
-    if (pickModeActive_ && *pickModeActive_) {
+    if ((pickModeActive_ && *pickModeActive_) || regionOnlyDrag_) {
         // § 드래그 영역 다중 선택(2026-09-23) - "일반 드래그로 뷰 회전이 안 된다"는
         // 리포트 수정. 처음엔 regionSelectModeActive_ 중 아무 좌클릭 드래그나 사각형
         // 선택으로 가로챘는데, 그러면 그 모드에서는 회전이 아예 불가능해졌다. 이제
@@ -1103,6 +1122,9 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
             pickRegionRubberBand_->show();
             return;
         }
+        if (regionOnlyDrag_) {
+            return; // 피킹 없는 사각형 선택 중 - 회전/호버 계산 없이 뗄 때까지 기다린다.
+        }
         // § 피킹 모드 중 뷰어 조작 허용(2026-09-13) - "측정 부위를 지정할 때도 화면
         // 뷰어를 마우스로 조작할 수 있게 해달라"는 요청. 좌클릭 피킹은 이제 뗄 때
         // (mouseReleaseEvent)까지 확정을 미루므로(드래그 영역 선택과 구분하기 위해),
@@ -1122,10 +1144,22 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
             return;
         }
 
-        // § 라이브 호버 미리보기(2026-09-11) - "마우스가 근처에 갔을 때 먼저 주황색으로
-        // 가이드가 보이면 좋겠다"는 요청. 클릭(mousePressEvent)과 완전히 같은 광선
-        // 계산으로 PickFace를 미리 불러보고, 결과를 paintGL이 옅은 주황 점으로 그린다 -
-        // 실제 클릭 전에 "여기를 찍게 된다"를 미리 확인할 수 있게.
+        // 호버 미리보기는 마우스가 잠깐 멈췄을 때 한 번만(§ 호버 미리보기 지연, 생성자 참고).
+        hoverPickTimer_->start();
+        return;
+    }
+    mouseMoveCameraOrModes(event, delta);
+}
+
+// § 라이브 호버 미리보기(2026-09-11) - "마우스가 근처에 갔을 때 먼저 주황색으로 가이드가 보이면 좋겠다"는
+// 요청. 클릭(mousePressEvent)과 완전히 같은 광선 계산으로 PickFace를 미리 불러보고, 결과를 paintGL이 옅은
+// 주황 점으로 그린다 - 실제 클릭 전에 "여기를 찍게 된다"를 미리 확인할 수 있게. 2026-11-04부터 마우스
+// 이동마다가 아니라 hoverPickTimer_가 멈춘 위치(lastMousePos_)에서 한 번만 부른다.
+void ModelViewport::updateHoverPick() {
+    if (!(pickModeActive_ && *pickModeActive_)) {
+        return;
+    }
+    {
         QVector3D rayOrigin;
         QVector3D rayDir;
         hoverPickValid_ = false;
@@ -1168,8 +1202,11 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
             }
         }
         update();
-        return;
     }
+}
+
+// 피킹/사각형 선택이 아닐 때의 마우스 이동 - 캡쳐 영역 드래그, 치수선 드래그, 카메라 조작.
+void ModelViewport::mouseMoveCameraOrModes(QMouseEvent* event, const QPoint& delta) {
     // § 캡쳐 영역 드래그 지정 - 회전 대신 고무줄 사각형 크기만 갱신.
     if (captureRegionModeActive_ && *captureRegionModeActive_) {
         if (rubberBand_ && rubberBand_->isVisible()) {
@@ -1224,8 +1261,10 @@ void ModelViewport::mouseReleaseEvent(QMouseEvent* event) {
     // 생성, show/hide만 반복) null 체크만으로는 이번 드래그가 Ctrl+드래그였는지 구분이
     // 안 된다, 반드시 isVisible()까지 봐야 함). Ctrl+드래그였다면 사각형 다중 선택으로,
     // 드래그가 아니었다면(순수 클릭) 기존 단일 피킹으로 나간다.
-    if (pickModeActive_ && *pickModeActive_ && event->button() == Qt::LeftButton && pickDragActive_) {
+    if (((pickModeActive_ && *pickModeActive_) || regionOnlyDrag_) && event->button() == Qt::LeftButton &&
+        pickDragActive_) {
         pickDragActive_ = false;
+        regionOnlyDrag_ = false;
         const bool didDrag = pickDidDrag_;
         pickDidDrag_ = false;
         if (didDrag) {

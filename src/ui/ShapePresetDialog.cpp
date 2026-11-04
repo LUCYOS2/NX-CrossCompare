@@ -176,15 +176,16 @@ void ShapePresetDialog::RebuildViewer() {
 }
 
 // § Ctrl+드래그 바로 선택(2026-11-04) - "마우스 드래그로도 선택할 수 있게(Ctrl+왼쪽), Shift+왼쪽은 해제"
-// 요청. 예전엔 "면 직접 선택..."을 먼저 눌러야만 드래그 선택이 됐다. 이제 다른 작업 중이 아니면 피킹 +
-// 사각형 선택을 켜 두어서, 언제든 Ctrl+드래그하면 바로 면 직접 선택으로 들어간다. 그냥 클릭은 무시하고
-// (onFacePicked가 대기 상태면 아무것도 안 함) 그냥 드래그는 예전처럼 화면 회전이다.
+// 요청. 예전엔 "면 직접 선택..."을 먼저 눌러야만 드래그 선택이 됐다. 이제 다른 작업 중이 아니면 사각형
+// 선택만 켜 두어서, 언제든 Ctrl+드래그하면 바로 면 직접 선택으로 들어간다. 피킹 모드는 끈다 - 피킹 모드는
+// 마우스가 움직일 때마다 무거운 호버 계산(PickFace)을 해서, 대기 상태에 켜 두면 큰 도면에서 렉/응답 없음이
+// 났다(같은 날 리포트). 그냥 클릭/드래그는 예전처럼 화면 조작이다.
 void ShapePresetDialog::ArmIdleSelection() {
     if (!viewerPanel_) {
         return;
     }
+    viewerPanel_->setPickModeActive(false);
     viewerPanel_->setRegionSelectModeActive(true);
-    viewerPanel_->setPickModeActive(true);
 }
 
 namespace {
@@ -253,6 +254,7 @@ void ShapePresetDialog::onFinishManualSelectClicked() {
     }
     manualSelectMode_ = false;
     finishManualSelectButton_->setVisible(false);
+    ArmIdleSelection();
     if (manualSelectedFaces_.empty()) {
         QMessageBox::information(this, "선택 없음", "면을 하나도 선택하지 않았습니다.");
         ResetCaptureState();
@@ -284,9 +286,10 @@ void ShapePresetDialog::onFacePicked(
     }
 
     if (!pickArmed_) {
-        return; // 대기 상태(ArmIdleSelection)의 그냥 클릭은 무시 - Ctrl+드래그만 선택을 시작한다.
+        return; // 대기 상태(ArmIdleSelection)의 클릭은 무시 - Ctrl+드래그만 선택을 시작한다.
     }
     pickArmed_ = false;
+    ArmIdleSelection(); // 자동 캡처는 클릭 한 번으로 끝 - 피킹(호버 계산)을 끄고 대기 상태로.
 
     const geometry::PickResult pick = adapter_->PickFace(handle, origin, dir);
     if (pick.kind == geometry::PickedFaceKind::None) {

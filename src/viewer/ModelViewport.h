@@ -19,6 +19,8 @@
 #include "viewer/Camera.h"
 
 class QRubberBand;
+class QTimer;
+class QMouseEvent;
 
 namespace viewer {
 
@@ -206,6 +208,14 @@ private:
     // 면 하이라이트(주황/초록) 그리기 전후의 GL 상태 - 단면 중이면 보이는 면에만 칠한다(cpp 주석 참고).
     void BeginFaceHighlightPass();
     void EndFaceHighlightPass();
+    // § 호버 미리보기 지연(2026-11-04) - hoverPickTimer_가 끝나면 lastMousePos_에서 PickFace를 한 번 부른다.
+    void updateHoverPick();
+    // mouseMoveEvent에서 피킹/사각형 선택 처리 뒤 나머지(캡쳐 영역, 치수선 드래그, 카메라 조작).
+    void mouseMoveCameraOrModes(QMouseEvent* event, const QPoint& delta);
+    static constexpr int kHoverPickDelayMs = 60;
+    QTimer* hoverPickTimer_ = nullptr;
+    // § 피킹 없는 사각형 선택 - 피킹 모드가 꺼진 채 regionSelect만 켜져 있을 때 Ctrl/Shift+왼쪽으로 시작한 드래그.
+    bool regionOnlyDrag_ = false;
 
     geometry::IGeometryAdapter* adapter_;
     geometry::ModelHandle handle_;

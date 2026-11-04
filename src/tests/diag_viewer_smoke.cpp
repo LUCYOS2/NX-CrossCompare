@@ -12,6 +12,7 @@
 #include <QSurfaceFormat>
 #include <QTimer>
 
+#include <chrono>
 #include <cstdio>
 #include <memory>
 #include <string>
@@ -46,6 +47,43 @@ int main(int argc, char** argv) {
         }
     }
     std::printf("loaded %zu model(s)\n", models.size());
+
+    // § 피킹 속도(2026-11-04, "형상 프리셋 렉" 리포트) - 첫 모델 bbox를 화면처럼 20x20 격자로 훑는 광선으로
+    // PickFace/PickFaceIndex를 불러 한 번당 평균 시간을 잰다(첫 호출의 캐시 생성 시간은 따로 찍음).
+    {
+        const auto handle = models.front().second;
+        const auto box = adapter.GetBoundingBox(handle);
+        const geometry::Vec3 dir{0.0, 0.0, -1.0};
+        const double z = box.max.z + 100.0;
+        auto rayAt = [&](int i, int j) {
+            return geometry::Vec3{box.min.x + (box.max.x - box.min.x) * (i + 0.5) / 20.0,
+                                  box.min.y + (box.max.y - box.min.y) * (j + 0.5) / 20.0, z};
+        };
+        auto start = std::chrono::steady_clock::now();
+        adapter.PickFace(handle, rayAt(10, 10), dir);
+        const double firstMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+        int hits = 0;
+        start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; ++i) {
+            for (int j = 0; j < 20; ++j) {
+                hits += adapter.PickFace(handle, rayAt(i, j), dir).kind != geometry::PickedFaceKind::None ? 1 : 0;
+            }
+        }
+        const double pickMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 400.0;
+        int faceSum = 0;
+        start = std::chrono::steady_clock::now();
+        for (int i = 0; i < 20; ++i) {
+            for (int j = 0; j < 20; ++j) {
+                faceSum += adapter.PickFaceIndex(handle, rayAt(i, j), dir);
+            }
+        }
+        const double indexMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 400.0;
+        std::printf("PickFace: first %.1f ms, then %.2f ms/call (hits %d/400) | PickFaceIndex %.2f ms/call (sum %d)\n",
+                    firstMs, pickMs, hits, indexMs, faceSum);
+    }
 
     auto panel = std::make_unique<viewer::MultiViewportPanel>(&adapter, models);
     panel->resize(1200, 800);
