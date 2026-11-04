@@ -60,6 +60,9 @@ public:
     FeaturePatchCapture CaptureFeaturePatch(ModelHandle handle, const Vec3& clickPoint) const override;
     std::vector<PatchCandidate> FindPatchCandidates(
         ModelHandle handle, const FeaturePatchDescriptor& descriptor, double similarityThreshold) const override;
+    // § 주변 지문 검증(2026-11-04) - IGeometryAdapter.h 주석 참고. 면 목록/bbox/모서리-면 맵은
+    // 모델별로 처음 쓸 때 한 번만 만들어 캐시한다.
+    FeaturePatchCapture CaptureLocalPatch(ModelHandle handle, const Vec3& center, double radiusMm) const override;
 
     // § 형상 프리셋 수동 선택(2026-09-18) - IGeometryAdapter.h 주석 참고. 인덱스는
     // TopExp_Explorer(shape, TopAbs_FACE) 순회 순서 기준(모델이 바뀌지 않는 한 고정).

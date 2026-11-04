@@ -420,6 +420,19 @@ rule::Anchor RuleEditorDialog::MakeAnchor(const PointEntry& p, const std::string
     return a;
 }
 
+void RuleEditorDialog::FinalizePointRef(PointEntry& entry, geometry::ModelHandle handle) const {
+    if (!entry.ref.has_value()) {
+        return;
+    }
+    if (entry.kind == geometry::PickedFaceKind::Plane) {
+        rule::RuleEngine::FinalizePlaneRef(*adapter_, handle, *entry.ref);
+        return;
+    }
+    rule::Anchor anchor = MakeAnchor(entry, "");
+    rule::RuleEngine::FinalizeAnchorRef(*adapter_, handle, anchor);
+    entry.ref = anchor.ref;
+}
+
 rule::PlaneRef RuleEditorDialog::MakePlaneRef(const PointEntry& p) {
     rule::PlaneRef plane;
     plane.planeType = p.type;
@@ -1327,6 +1340,9 @@ void RuleEditorDialog::onAddPresetPointClicked() {
     // (TryInferMeasurementType의 isPointLike 판정 참고).
     entry.kind = geometry::PickedFaceKind::Point;
     entry.modelHandle = handle;
+    // 저장했다 불러오면 DB가 프리셋 이름으로 복원하는 값과 같다 - 지금 채워둬야 FinalizePointRef가
+    // 엔진과 같은 프리셋 검색으로 기준 위치를 확정할 수 있다.
+    entry.patchDescriptor = descriptor;
 
     // § 즉시 미리보기 - 대표 인치에서 한 번 검색해서 유사도 최고점 위치를 바로
     // 마커로 보여준다(저장 후 실제 다른 인치 적용은 RuleEngine이 알아서 한다 -
@@ -1343,6 +1359,7 @@ void RuleEditorDialog::onAddPresetPointClicked() {
         // § 클릭 기준 좌표 - 대표 인치에서 고른 이 위치를 기준으로 저장해두면, 같은 프리셋이
         // 모델에 여러 개 있어도 엔진이 유사도 최고점이 아니라 "이 자리"의 것을 고른다.
         entry.ref = rule::RefGeometry{best->position, std::nullopt, adapter_->GetBoundingBox(handle)};
+        FinalizePointRef(entry, handle);
     }
     AddPoint(entry);
 }
@@ -1454,6 +1471,7 @@ void RuleEditorDialog::onFacePicked(
     }
     ref.sourceBox = adapter_->GetBoundingBox(handle);
     entry.ref = ref;
+    FinalizePointRef(entry, handle);
     AddPoint(entry);
 
     // § "지정 누르면 연달아 포인트 2개" - 아직 1개뿐이면 사용자가 다시 버튼을 누를

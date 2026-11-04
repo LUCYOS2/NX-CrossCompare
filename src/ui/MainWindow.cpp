@@ -316,7 +316,9 @@ void MainWindow::refreshComparisonTable() {
             const auto& result = results[col];
             QTableWidgetItem* item = nullptr;
             if (!result.ok) {
-                item = new QTableWidgetItem("실패");
+                // § 실패 사유 표시(2026-11-04) - 툴팁에만 있으면 실패가 왜 났는지 눈에 안 띈다. 칸에
+                // 사유를 바로 쓰고(칸이 좁으면 잘림), 전체 문장은 툴팁에 둔다.
+                item = new QTableWidgetItem(QString("실패: %1").arg(QString::fromStdString(result.error)));
                 item->setBackground(QBrush(QColor(220, 220, 220)));
                 item->setToolTip(QString("측정 실패: %1").arg(QString::fromStdString(result.error)));
             } else if (result.spec.has_value()) {
@@ -333,6 +335,15 @@ void MainWindow::refreshComparisonTable() {
                 item->setToolTip(QString("도면 스펙 없음 - 가장 작은 인치 대비 편차 %1%2 mm (도면 판정 아님)")
                                      .arg(result.deviation >= 0.0 ? "+" : "")
                                      .arg(result.deviation, 0, 'f', 3));
+            }
+            // § 인치 간 값 일관성(2026-11-04) - 값은 냈지만 튀는 인치는 ⚠를 붙이고 글자를 주황색으로,
+            // 사유는 툴팁 맨 앞에 둔다(판정 배경색은 그대로 - 합격/불합격과 별개인 "확인 필요" 표시).
+            if (result.ok && !result.warning.empty()) {
+                item->setText(item->text() + " ⚠");
+                item->setForeground(QBrush(QColor(200, 90, 0)));
+                item->setToolTip(QString("⚠ 확인 필요: %1\n%2")
+                                     .arg(QString::fromStdString(result.warning))
+                                     .arg(item->toolTip()));
             }
             comparisonTable_->setItem(rowIdx, kFixedColumnCount + static_cast<int>(col), item);
         }

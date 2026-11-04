@@ -19,6 +19,12 @@ struct RefGeometry {
     // 평면을 클릭했을 때만 - 면 방향까지 반영한 바깥쪽 법선(판재 앞/뒷면 구분용).
     std::optional<geometry::Vec3> normal;
     geometry::BoundingBox sourceBox;
+    // § 주변 지문 검증(2026-11-04) - 기준 인치에서 확정된 위치 주변(localPatchRadiusMm 반경)의
+    // 형상 지문. 다른 인치에서 위치로 고른 후보 주변의 지문이 이것과 다르면 "다른 형상을 잡았다"고
+    // 보고 실패시킨다(RuleEngine::FinalizeAnchorRef/FinalizePlaneRef가 저장 전에 채움). 예전
+    // 규칙이나 실 형상이 없는 어댑터는 nullopt - 이때는 검증을 건너뛴다.
+    std::optional<geometry::FeaturePatchDescriptor> localPatch;
+    double localPatchRadiusMm = 0.0;
 };
 
 // 규칙에 등장하는 기준 지오메트리 하나. role은 "A"/"B"(두 anchor 비교) 또는

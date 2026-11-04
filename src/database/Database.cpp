@@ -65,6 +65,11 @@ std::string SerializeRef(const rule::RefGeometry& ref) {
     }
     oss << '|' << ref.sourceBox.min.x << ',' << ref.sourceBox.min.y << ',' << ref.sourceBox.min.z << ','
         << ref.sourceBox.max.x << ',' << ref.sourceBox.max.y << ',' << ref.sourceBox.max.z;
+    // § 주변 지문 검증(2026-11-04) - 지문이 있으면 "|반경;지문"을 뒤에 붙인다(지문 자체가 '|'로
+    // 구분되므로 맨 끝에 둔다). 예전 형식(3칸)도 그대로 읽힌다 - 컬럼 추가 마이그레이션 불필요.
+    if (ref.localPatch.has_value()) {
+        oss << '|' << ref.localPatchRadiusMm << ';' << SerializeDescriptor(*ref.localPatch);
+    }
     return oss.str();
 }
 
@@ -104,6 +109,14 @@ std::optional<rule::RefGeometry> DeserializeRef(const std::string& text) {
         const auto normal = ParseDoubles(normalPart, 3);
         if (normal) {
             ref.normal = geometry::Vec3{(*normal)[0], (*normal)[1], (*normal)[2]};
+        }
+    }
+    std::string patchPart;
+    if (std::getline(iss, patchPart)) {
+        const auto separator = patchPart.find(';');
+        if (separator != std::string::npos) {
+            ref.localPatchRadiusMm = std::stod(patchPart.substr(0, separator));
+            ref.localPatch = DeserializeDescriptor(patchPart.substr(separator + 1));
         }
     }
     return ref;

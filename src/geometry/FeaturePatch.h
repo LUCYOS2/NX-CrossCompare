@@ -2,8 +2,10 @@
 
 #include "geometry/IGeometryAdapter.h"
 
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Pnt.hxx>
 
 #include <array>
 #include <vector>
@@ -50,11 +52,16 @@ Vec3 PatchCentroid(const std::vector<TopoDS_Face>& patch);
 std::vector<TopoDS_Face> ExtractFeaturePatch(
     const TopoDS_Shape& wholeShape, const TopoDS_Face& seedFace, double maxRadius);
 
+// § 주변 지문 검증(2026-11-04) - seedFace에서 인접 면으로 확장하되, center에서 radius 안에 걸치는
+// 면(면 bbox까지의 거리 기준)만 따라간다. 이면각으로 끊지 않고 면 중심이 아니라 면 범위로 판단해서,
+// 같은 자리의 어느 면을 시드로 잡아도(꼭짓점처럼 여러 면이 거리 0인 경우) 같은 패치가 나온다.
+// edgeFaceMap은 TopExp::MapShapesAndAncestors(shape, EDGE, FACE) 결과 - 호출 쪽이 캐시해서 넘긴다.
+std::vector<TopoDS_Face> ExtractLocalPatch(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
+                                           const TopoDS_Face& seedFace, const gp_Pnt& center, double radius);
+
 FeaturePatchDescriptor ComputePatchDescriptor(const std::vector<TopoDS_Face>& patch);
 
-// 두 지문의 유사도(0~1, 1이 완전 일치) - 면 타입 히스토그램/bbox 비율/경계 비율/대표
-// 반지름 비율의 가중 차이를 종합한다.
-double PatchSimilarity(const FeaturePatchDescriptor& a, const FeaturePatchDescriptor& b);
+// PatchSimilarity는 IGeometryAdapter.h에 선언돼 있다(OCCT 없이 RuleEngine이 쓰도록).
 
 // wholeShape 전체에서 descriptor와 비슷한 패치를 찾는다. excludeFaces에 있는 면은 시드
 // 후보에서 제외한다(같은 모델 내 "나머지 찾기"에서 원본 패치를 다시 찾지 않도록). 지문의

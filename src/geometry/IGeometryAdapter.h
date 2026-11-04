@@ -141,6 +141,11 @@ struct FeaturePatchDescriptor {
     double dominantRadiusRatio = 0.0;
 };
 
+// 두 지문의 유사도(0~1, 1이 완전 일치) - 면 타입 히스토그램/bbox 비율/경계 비율/대표
+// 반지름 비율의 가중 차이를 종합한다. 순수 계산이라 OCCT 없이 쓸 수 있게 여기 선언한다
+// (구현은 FeaturePatch.cpp) - RuleEngine이 인치 간 매칭 결과의 주변 형상을 검증할 때 쓴다.
+double PatchSimilarity(const FeaturePatchDescriptor& a, const FeaturePatchDescriptor& b);
+
 // 뷰어에서 클릭 한 번으로 형상을 "등록"한 결과 - 지문 + 대표 위치(면적 가중 중심).
 struct FeaturePatchCapture {
     FeaturePatchDescriptor descriptor;
@@ -212,6 +217,18 @@ public:
     virtual FeaturePatchCapture CaptureFeaturePatch(ModelHandle handle, const Vec3& clickPoint) const {
         (void)handle;
         (void)clickPoint;
+        return FeaturePatchCapture{};
+    }
+
+    // § 주변 지문 검증(2026-11-04) - center에서 radiusMm 안에 걸치는 면들(center에 가장 가까운
+    // 면과 연결된 것만)의 지문. CaptureFeaturePatch와 달리 반경이 모델 크기 비율이 아니라 절대값(mm)
+    // 이고 이면각으로 확장을 끊지 않는다 - 후크/보스 같은 국부 형상은 인치가 달라도 크기가 거의
+    // 같아서, 같은 mm 반경으로 떠야 인치 간 지문을 비교할 수 있다. 실 형상이 없는 어댑터는
+    // override 불필요(valid=false면 엔진이 검증을 건너뛴다).
+    virtual FeaturePatchCapture CaptureLocalPatch(ModelHandle handle, const Vec3& center, double radiusMm) const {
+        (void)handle;
+        (void)center;
+        (void)radiusMm;
         return FeaturePatchCapture{};
     }
 

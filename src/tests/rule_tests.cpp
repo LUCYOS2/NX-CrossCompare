@@ -130,6 +130,13 @@ void TestRefGeometryAndSpecRoundTrip() {
     r.referenceFrame = {"World_Origin"};
     rule::Anchor point{"single", "Edge_Midpoint", "", std::nullopt, std::nullopt};
     point.ref = rule::RefGeometry{geometry::Vec3{-590.123456789, 12.5, 30.0}, std::nullopt, box};
+    geometry::FeaturePatchDescriptor patch;
+    patch.surfaceTypeCounts = {2, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    patch.faceCount = 3;
+    patch.bboxRatioZ = 0.25;
+    patch.boundaryLengthRatio = 4.5;
+    point.ref->localPatch = patch;
+    point.ref->localPatchRadiusMm = 10.0;
     r.anchors = {point};
     rule::PlaneRef plane{"Datum_Plane", ""};
     plane.ref = rule::RefGeometry{geometry::Vec3{-580.0, 0.0, 0.0}, geometry::Vec3{0.0, 0.0, -1.0}, box};
@@ -145,11 +152,19 @@ void TestRefGeometryAndSpecRoundTrip() {
         Check(std::abs(ref.position.x - (-590.123456789)) < 1e-9, "anchor ref position should keep full precision");
         Check(!ref.normal.has_value(), "point ref should have no normal");
         Check(std::abs(ref.sourceBox.max.z - 45.125) < 1e-9, "anchor ref source box should round-trip");
+        Check(ref.localPatch.has_value() && std::abs(ref.localPatchRadiusMm - 10.0) < 1e-12,
+              "local patch fingerprint should round-trip with its radius");
+        if (ref.localPatch) {
+            Check(ref.localPatch->surfaceTypeCounts[1] == 1 && ref.localPatch->faceCount == 3 &&
+                      std::abs(ref.localPatch->boundaryLengthRatio - 4.5) < 1e-9,
+                  "local patch fingerprint values should be kept");
+        }
     }
     Check(loaded.referencePlane && loaded.referencePlane->ref && loaded.referencePlane->ref->normal,
           "plane ref with normal should round-trip");
     if (loaded.referencePlane && loaded.referencePlane->ref && loaded.referencePlane->ref->normal) {
         Check(std::abs(loaded.referencePlane->ref->normal->z + 1.0) < 1e-12, "plane normal sign should be kept");
+        Check(!loaded.referencePlane->ref->localPatch.has_value(), "ref saved without a fingerprint should stay without one");
     }
     Check(loaded.specByInch.size() == 2 && std::abs(loaded.specByInch.at(65) - 8.75) < 1e-12,
           "per-inch drawing specs should round-trip");

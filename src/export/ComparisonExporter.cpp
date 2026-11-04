@@ -40,9 +40,11 @@ void ExportComparisonCsv(const std::string& filePath, const std::vector<RuleRepo
     // 따로 둔다. 도면 스펙이 없는 인치는 spec_mm이 비고, 측정 실패한 인치는 value_mm/deviation_mm이
     // 빈다. status: PASS/FAIL(도면 스펙 판정), COMPARE_PASS/COMPARE_FAIL(도면 스펙 없음 - 인치 간
     // 비교), ERROR(측정 실패, 사유는 error). within_tolerance는 예전 CSV를 읽는 쪽 호환용.
+    // § 인치 간 값 일관성(2026-11-04) - warning: 값은 냈지만 도면 스펙/다른 인치 추세와 차이가 커서
+    // 사람이 확인해야 하는 사유(비어 있으면 이상 없음). 판정(status)과는 별개다.
     file << "rule,model,inch,ctq_code,check_point_category,spec_mm,tolerance_plus_mm,"
             "tolerance_minus_mm,measurement_type,image_path,within_tolerance,"
-            "value_mm,deviation_mm,status,error\n";
+            "value_mm,deviation_mm,status,error,warning\n";
     for (const auto& r : reports) {
         const std::string ctqCode = r.ctqCode.value_or("");
         const std::string category = r.checkPointCategory.value_or("");
@@ -74,7 +76,7 @@ void ExportComparisonCsv(const std::string& filePath, const std::vector<RuleRepo
             if (result.ok) {
                 file << result.deviation;
             }
-            file << "," << status << "," << CsvQuote(result.error) << "\n";
+            file << "," << status << "," << CsvQuote(result.error) << "," << CsvQuote(result.warning) << "\n";
         }
     }
 }

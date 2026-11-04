@@ -277,11 +277,72 @@ std::wstring Utf8ToWide(const std::string& utf8) {
 
 } // namespace
 
+// 점에서 축정렬 박스까지의 거리 제곱(박스 안이면 0).
+double SquaredDistanceToBox(const gp_Pnt& p, const BoundingBox& box) {
+    const double dx = std::max({box.min.x - p.X(), 0.0, p.X() - box.max.x});
+    const double dy = std::max({box.min.y - p.Y(), 0.0, p.Y() - box.max.y});
+    const double dz = std::max({box.min.z - p.Z(), 0.0, p.Z() - box.max.z});
+    return dx * dx + dy * dy + dz * dz;
+}
+
 struct StepGeometryAdapter::Impl {
     struct LoadedModel {
         std::string filePath;
         TopoDS_Shape shape;
         BoundingBox bounds;
+        // § 주변 지문 검증(2026-11-04) - 비교 테이블을 갱신할 때마다 규칙×인치×포인트 수만큼
+        // CaptureLocalPatch가 불리므로, 모델이 바뀌지 않는 한 같은 값인 면 목록/면 bbox/모서리-면
+        // 맵은 처음 쓸 때 한 번만 만든다(LoadedModel은 const로 다뤄지므로 mutable).
+        mutable std::vector<std::pair<TopoDS_Face, BoundingBox>> faceBoxes;
+        mutable std::unique_ptr<TopTools_IndexedDataMapOfShapeListOfShape> edgeFaceMap;
+
+        const std::vector<std::pair<TopoDS_Face, BoundingBox>>& FaceBoxes() const {
+            if (faceBoxes.empty()) {
+                for (TopExp_Explorer faceExp(shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
+                    const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
+                    faceBoxes.emplace_back(face, FaceBoundingBox(face));
+                }
+            }
+            return faceBoxes;
+        }
+
+        const TopTools_IndexedDataMapOfShapeListOfShape& EdgeFaceMap() const {
+            if (!edgeFaceMap) {
+                edgeFaceMap = std::make_unique<TopTools_IndexedDataMapOfShapeListOfShape>();
+                TopExp::MapShapesAndAncestors(shape, TopAbs_EDGE, TopAbs_FACE, *edgeFaceMap);
+            }
+            return *edgeFaceMap;
+        }
+
+        // FindNearestFace와 같은 결과를 내되, 면 bbox까지의 거리가 지금까지의 최솟값보다 먼 면은
+        // 정확한 거리 계산(BRepExtrema)을 건너뛴다 - bbox가 가까운 면부터 본다.
+        bool FindNearestFaceFast(const gp_Pnt& point, TopoDS_Face& outFace) const {
+            const auto& boxes = FaceBoxes();
+            std::vector<std::pair<double, std::size_t>> order;
+            order.reserve(boxes.size());
+            for (std::size_t i = 0; i < boxes.size(); ++i) {
+                order.emplace_back(SquaredDistanceToBox(point, boxes[i].second), i);
+            }
+            std::sort(order.begin(), order.end());
+            const TopoDS_Vertex vertex = BRepBuilderAPI_MakeVertex(point);
+            double bestDist = std::numeric_limits<double>::max();
+            bool found = false;
+            for (const auto& [boxDistSq, index] : order) {
+                if (found && boxDistSq > bestDist * bestDist) {
+                    break;
+                }
+                BRepExtrema_DistShapeShape extrema(vertex, boxes[index].first);
+                if (!extrema.IsDone() || extrema.NbSolution() == 0) {
+                    continue;
+                }
+                if (extrema.Value() < bestDist) {
+                    bestDist = extrema.Value();
+                    outFace = boxes[index].first;
+                    found = true;
+                }
+            }
+            return found;
+        }
     };
 
     std::unordered_map<ModelHandle, LoadedModel> models;
@@ -807,6 +868,28 @@ FeaturePatchCapture StepGeometryAdapter::CaptureFeaturePatch(ModelHandle handle,
     for (const auto& face : patch) {
         AppendFaceTriangles(face, capture.highlightTriangles);
     }
+    return capture;
+}
+
+FeaturePatchCapture StepGeometryAdapter::CaptureLocalPatch(
+    ModelHandle handle, const Vec3& center, double radiusMm) const {
+    const auto* model = impl_->Find(handle);
+    if (!model) {
+        return FeaturePatchCapture{};
+    }
+    const gp_Pnt centerPnt(center.x, center.y, center.z);
+    TopoDS_Face seedFace;
+    if (!model->FindNearestFaceFast(centerPnt, seedFace)) {
+        return FeaturePatchCapture{};
+    }
+    const std::vector<TopoDS_Face> patch = ExtractLocalPatch(model->EdgeFaceMap(), seedFace, centerPnt, radiusMm);
+    if (patch.empty()) {
+        return FeaturePatchCapture{};
+    }
+    FeaturePatchCapture capture;
+    capture.descriptor = ComputePatchDescriptor(patch);
+    capture.position = center;
+    capture.valid = true;
     return capture;
 }
 

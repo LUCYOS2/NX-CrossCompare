@@ -6,6 +6,7 @@ CSV 컬럼(ComparisonExporter.cpp 참고, 세로형/long - 규칙×인치 조합
     rule, model, inch, ctq_code, check_point_category, spec_mm, tolerance_plus_mm,
     tolerance_minus_mm, measurement_type, image_path, within_tolerance,
     value_mm, deviation_mm, status, error   (2026-10-30 추가)
+    warning                                 (2026-11-04 추가 - 인치 간 값 일관성 경고)
 
 목표(2026-09-12 요청): "치수 비교 테이블의 규칙관리 측정부위, 이미지 등 정보와 측정된
 데이터를 같이 추출". 화면(치수 비교 테이블)은 규칙×인치 매트릭스를 그대로 쓰지만, 엑셀은
@@ -46,10 +47,13 @@ HEADER_FONT = Font(bold=True)
 # 측정방법) 앞에 이미지 컬럼을 하나 더 둔다 - "이미지 등 정보"도 같이 뽑히길 원했으므로.
 # § 도면 스펙(2026-10-30) - 측정값/편차/판정 3칸을 뒤에 붙인다. 도면 스펙이 없는 인치는 도면
 # 스펙 칸이 비고(인치 간 비교만), 측정 실패한 인치는 측정값/편차 칸이 비고 판정 칸에 사유가 들어간다.
+# § 인치 간 값 일관성(2026-11-04) - "확인 필요" 칸: 값은 나왔지만 도면 스펙/다른 인치 추세와 차이가
+# 커서 엉뚱한 형상을 잡았을 수 있는 경우의 사유(판정과 별개).
 HEADERS = [
     "측정 부위 이미지", "규칙", "모델", "인치", "포인트(부위)", "관리항목 종류",
-    "도면 스펙(mm)", "공차(mm)", "측정방법", "측정값(mm)", "편차(mm)", "판정",
+    "도면 스펙(mm)", "공차(mm)", "측정방법", "측정값(mm)", "편차(mm)", "판정", "확인 필요",
 ]
+WARN_FONT = Font(color="C85A00")
 STATUS_LABELS = {
     "PASS": "합격",
     "FAIL": "불합격",
@@ -120,8 +124,11 @@ def convert(csv_path: str, xlsx_path: str) -> None:
             value_mm,
             _optional_float(row.get("deviation_mm", "")),
             STATUS_LABELS.get(status, f"측정 실패: {row.get('error', '')}"),
+            row.get("warning", ""),
         ])
         ws.row_dimensions[row_idx].height = IMAGE_ROW_HEIGHT_POINTS
+        if row.get("warning"):
+            ws.cell(row=row_idx, column=HEADERS.index("확인 필요") + 1).font = WARN_FONT
 
         # "측정값" 칸에 공차 통과/실패 색상을 입혀서 한눈에 보이게(측정 실패는 회색).
         value_col = HEADERS.index("측정값(mm)") + 1

@@ -8,12 +8,17 @@
 //    (실패 - 값을 안 냄), 다른 형상(오답 - 가장 위험)으로 나눠 센다. 오답은 0이어야 한다.
 // 2) 다른 인치 모델이 주어지면 같은 클릭 좌표로 매칭해서 성공/실패 개수와 실패 사유를 보여준다
 //    (정답 세트가 없어 정답/오답은 판정 못 함 - 실패율과 사유 분포 확인용).
+//
+// § 주변 지문 검증(2026-11-04) - 앱에서 포인트를 지정할 때와 똑같이 RuleEngine::FinalizeAnchorRef/
+// FinalizePlaneRef로 기준 모델의 주변 지문을 붙인 뒤 검사한다. 다른 인치에서 "주변 형상이 기준
+// 인치와 다름" 사유가 많으면 kLocalPatchRadiusMm/kLocalPatchMinSimilarity 튜닝이 필요하다는 뜻.
 
 #include "geometry/StepGeometryAdapter.h"
 #include "rule/Matching.h"
 #include "rule/Measure.h"
 #include "rule/RuleEngine.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <map>
@@ -81,7 +86,9 @@ void CheckAnchors(const geometry::IGeometryAdapter& adapter, geometry::ModelHand
     }
 }
 
-rule::Anchor MakeRefAnchor(const std::string& type, const geometry::Vec3& position, const geometry::BoundingBox& box,
+// 앱에서 포인트를 지정할 때처럼 기준 모델에서 ref를 확정하고 주변 지문을 붙인다.
+rule::Anchor MakeRefAnchor(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle source,
+                           const std::string& type, const geometry::Vec3& position, const geometry::BoundingBox& box,
                            double diameter = 0.0) {
     rule::Anchor a;
     a.role = "A";
@@ -91,6 +98,7 @@ rule::Anchor MakeRefAnchor(const std::string& type, const geometry::Vec3& positi
         a.paramValue = diameter;
     }
     a.ref = rule::RefGeometry{position, std::nullopt, box};
+    rule::RuleEngine::FinalizeAnchorRef(adapter, source, a);
     return a;
 }
 
@@ -118,6 +126,7 @@ int main(int argc, char** argv) {
                                 (box.min.z + box.max.z) * 0.5};
     const double everywhere = rule::ComputePointToPointDistance(box.min, box.max) + 1.0;
 
+    const auto started = std::chrono::steady_clock::now();
     std::printf("기준 모델: %s\n", argv[1]);
     std::printf("bbox: (%.2f, %.2f, %.2f) ~ (%.2f, %.2f, %.2f), 매칭 반경 %.2fmm\n", box.min.x, box.min.y, box.min.z,
                 box.max.x, box.max.y, box.max.z, rule::MatchRadiusMm(box));
@@ -125,7 +134,7 @@ int main(int argc, char** argv) {
     std::vector<rule::Anchor> holeAnchors;
     for (const auto& hole : adapter.FindAnchorCandidates(source, "Hole", "")) {
         if (holeAnchors.size() >= kMaxSamplesPerKind) break;
-        holeAnchors.push_back(MakeRefAnchor("Hole", hole.position, box, hole.diameterMm));
+        holeAnchors.push_back(MakeRefAnchor(adapter, source, "Hole", hole.position, box, hole.diameterMm));
     }
     std::printf("\n원통(구멍) 후보 %zu개 (반원통 합친 뒤)\n", adapter.FindAnchorCandidates(source, "Hole", "").size());
     CheckAnchors(adapter, source, others, holeAnchors, "구멍");
@@ -139,7 +148,7 @@ int main(int argc, char** argv) {
         std::vector<rule::Anchor> anchors;
         for (const auto& p : adapter.FindPointCandidates(source, kind, center, everywhere)) {
             if (anchors.size() >= kMaxSamplesPerKind) break;
-            anchors.push_back(MakeRefAnchor(type, p.position, box));
+            anchors.push_back(MakeRefAnchor(adapter, source, type, p.position, box));
         }
         CheckAnchors(adapter, source, others, anchors, type);
     }
@@ -156,10 +165,11 @@ int main(int argc, char** argv) {
             if (count++ >= kMaxSamplesPerKind) break;
             rule::Rule r;
             r.measurementType = rule::MeasurementType::PointToPlane;
-            r.anchors = {MakeRefAnchor("Vertex", tip, box)};
+            r.anchors = {MakeRefAnchor(adapter, source, "Vertex", tip, box)};
             r.anchors[0].role = "single";
             rule::PlaneRef ref{"Datum_Plane", ""};
             ref.ref = rule::RefGeometry{plane.pointOnPlane, plane.normal, box};
+            rule::RuleEngine::FinalizePlaneRef(adapter, source, *ref.ref);
             r.referencePlane = ref;
             const auto result = rule::RuleEngine::Evaluate(adapter, {{0, source}}, r).front();
             const double expected = rule::ComputePointToPlaneDistance(tip, plane.pointOnPlane, plane.normal);
@@ -175,5 +185,8 @@ int main(int argc, char** argv) {
         std::printf("\n평면 후보 %zu개\n", planes.size());
         Print("평면(높이)", planeTally);
     }
+    const double seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::printf("\n소요 시간 %.1f초\n", seconds);
     return 0;
 }

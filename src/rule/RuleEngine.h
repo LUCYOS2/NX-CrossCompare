@@ -25,6 +25,9 @@ struct InchResult {
     double deviation = 0.0;
     double deltaFromBaseline = 0.0; // 기준 인치(값을 낸 인치 중 가장 작은 인치) 대비 편차
     bool withinTolerance = false;
+    // § 인치 간 값 일관성(2026-11-04) - 값은 냈지만 도면 스펙과 차이가 지나치게 크거나 다른 인치들의
+    // 추세에서 튀면 사유가 담긴다(비어 있으면 이상 없음). 실패가 아니라 "사람이 확인할 것" 표시다.
+    std::string warning;
 };
 
 // Reference Frame(§5, 실제로는 절대좌표 그대로 사용) + Selector + Measurement를 묶어
@@ -48,6 +51,21 @@ public:
     static std::optional<geometry::Vec3> ResolveAnchorPosition(
         const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, const Anchor& anchor,
         std::string* error = nullptr);
+
+    // § 주변 지문 검증(2026-11-04) - 클릭으로 포인트를 지정한 직후(기준 인치 모델 handle로) 부른다.
+    // 평가와 같은 방법으로 기준 모델에서 매칭해서, ref.position을 실제로 잡힌 형상 위치(구멍이면 원통
+    // 구간 중앙)로 맞추고 그 자리의 주변 지문을 ref.localPatch에 저장한다. 기준 모델에서도 못 찾으면
+    // 아무것도 바꾸지 않는다.
+    static void FinalizeAnchorRef(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
+                                  Anchor& anchor);
+    // 평면 클릭(기준 평면, 면 간격의 면) - 위치는 클릭 점 그대로 두고 주변 지문만 저장한다.
+    static void FinalizePlaneRef(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
+                                 RefGeometry& ref);
+
+    // § 인치 간 값 일관성(2026-11-04) - Evaluate가 마지막에 부른다(테스트용으로 공개). 도면 스펙과
+    // 차이가 공차 폭의 kSuspectToleranceMultiple배(최소 kSuspectMinDeviationMm)를 넘거나, 도면 스펙이
+    // 없는 인치가 다른 인치들의 직선 추세에서 튀면 InchResult::warning을 채운다.
+    static void AddConsistencyWarnings(const Rule& rule, std::vector<InchResult>& results);
 };
 
 } // namespace rule

@@ -245,6 +245,9 @@ public:
         std::vector<geometry::AnchorCandidate> holes;
         std::vector<geometry::PlaneCandidate> planes;
         std::vector<geometry::Vec3> vertices;
+        // § 주변 지문 검증 - (위치, 그 자리의 주변 지문). CaptureLocalPatch는 반경 안의 가장 가까운
+        // 항목을 돌려주고, 없으면 "평평한 판" 지문을 돌려준다.
+        std::vector<std::pair<geometry::Vec3, geometry::FeaturePatchDescriptor>> patches;
     };
 
     geometry::ModelHandle Add(Model model) {
@@ -283,10 +286,55 @@ public:
         }
         return result;
     }
+    geometry::FeaturePatchCapture CaptureLocalPatch(
+        geometry::ModelHandle h, const geometry::Vec3& center, double radiusMm) const override {
+        geometry::FeaturePatchCapture capture;
+        capture.valid = true;
+        capture.position = center;
+        capture.descriptor = FlatPatch();
+        double best = radiusMm;
+        for (const auto& [position, descriptor] : models_[h].patches) {
+            const double d = rule::ComputePointToPointDistance(position, center);
+            if (d <= best) {
+                best = d;
+                capture.descriptor = descriptor;
+            }
+        }
+        return capture;
+    }
+
+    static geometry::FeaturePatchDescriptor FlatPatch() {
+        geometry::FeaturePatchDescriptor d;
+        d.surfaceTypeCounts[0] = 1;
+        d.faceCount = 1;
+        d.bboxRatioZ = 0.0;
+        return d;
+    }
 
 private:
     std::vector<Model> models_;
 };
+
+// 구멍 주변(원통 1 + 평면 2) / 보스 주변(원통 2 + 원뿔 1 + 평면 3) - 면 타입 구성이 달라 유사도가 낮다.
+geometry::FeaturePatchDescriptor HolePatch() {
+    geometry::FeaturePatchDescriptor d;
+    d.surfaceTypeCounts[0] = 2;
+    d.surfaceTypeCounts[1] = 1;
+    d.faceCount = 3;
+    d.bboxRatioZ = 0.3;
+    d.dominantRadiusRatio = 0.1;
+    return d;
+}
+
+geometry::FeaturePatchDescriptor BossPatch() {
+    geometry::FeaturePatchDescriptor d;
+    d.surfaceTypeCounts[1] = 2;
+    d.surfaceTypeCounts[2] = 1;
+    d.faceCount = 6;
+    d.bboxRatioZ = 1.0;
+    d.dominantRadiusRatio = 0.6;
+    return d;
+}
 
 geometry::AnchorCandidate MakeHole(double x, double y, double z, double diameter) {
     geometry::AnchorCandidate c;
@@ -427,6 +475,117 @@ void TestClickedPlaneAndPointHeightAndGap() {
           "clicked-point rule without stored coordinates should ask to re-pick, not guess");
 }
 
+// § 주변 지문 검증(2026-11-04) - 저장할 때 기준 인치에서 ref를 실제 형상 위치로 맞추고 지문을 붙인다.
+// 다른 인치에서 같은 자리에 "유일한" 구멍이 있어도, 주변 형상이 다르면(구멍 대신 보스) 실패해야 한다.
+void TestLocalPatchRejectsDifferentFeatureAtPredictedSpot() {
+    FakeAdapter adapter;
+    auto m55 = MakeChassis(600.0, 350.0);
+    m55.patches = {{geometry::Vec3{-590.0, 0.0, 20.0}, HolePatch()}};
+    auto m65 = MakeChassis(700.0, 400.0);
+    m65.patches = {{geometry::Vec3{-690.0, 0.0, 20.0}, HolePatch()}};
+    auto m75 = MakeChassis(800.0, 450.0);
+    m75.patches = {{geometry::Vec3{-790.0, 0.0, 20.0}, BossPatch()}};
+    const auto h55 = adapter.Add(m55);
+    const auto h65 = adapter.Add(m65);
+    const auto h75 = adapter.Add(m75);
+
+    rule::Anchor a{"A", "Hole", "", std::optional<std::string>("diameter"), std::optional<double>(3.0)};
+    a.ref = Ref(-590.0, 0.4, 22.5, adapter.GetBoundingBox(h55)); // 원통 축 위 아무 데나 클릭한 셈
+    rule::RuleEngine::FinalizeAnchorRef(adapter, h55, a);
+    Check(a.ref->localPatch.has_value() && a.ref->localPatchRadiusMm > 0.0, "finalize should attach the local patch");
+    Check(std::abs(a.ref->position.y) < 1e-9 && std::abs(a.ref->position.z - 20.0) < 1e-9,
+          "finalize should snap the ref to the matched hole position");
+
+    rule::Anchor b{"B", "Hole", "", std::optional<std::string>("diameter"), std::optional<double>(3.0)};
+    b.ref = Ref(0.0, 0.0, 20.0, adapter.GetBoundingBox(h55));
+    rule::RuleEngine::FinalizeAnchorRef(adapter, h55, b);
+
+    rule::Rule r;
+    r.name = "구멍 간 거리";
+    r.measurementType = rule::MeasurementType::PointToPoint;
+    r.projection = "3D";
+    r.anchors = {a, b};
+    const auto results = rule::RuleEngine::Evaluate(adapter, {{55, h55}, {65, h65}, {75, h75}}, r);
+    Check(results[0].ok && results[1].ok, "same surroundings should pass the local patch check");
+    Check(!results[2].ok && results[2].error.find("주변 형상") != std::string::npos,
+          "different surroundings at the predicted spot should fail with a reason");
+}
+
+// § 국부 기준(측정면 원칙 3) - 후크 끝은 중앙 기준으로, 그 옆 선반면은 왼쪽 외곽 기준으로 예측되는
+// 위치라서, 외곽 기준으로 선반면을 찾으면 65"에서 엉뚱한 평면(z=8)을 잡는다. 매칭된 후크 끝에서의
+// 상대 위치로 찾으면 바로 옆 선반면(z=5)을 잡아야 한다.
+void TestLocalReferencePlaneFollowsMatchedPoint() {
+    const auto makeModel = [](double halfWidth, bool withDistractor) {
+        FakeAdapter::Model m;
+        m.box = geometry::BoundingBox{geometry::Vec3{-halfWidth, -350.0, 0.0}, geometry::Vec3{halfWidth, 350.0, 40.0}};
+        m.vertices = {geometry::Vec3{-290.0, 0.0, 30.0}};
+        m.planes = {MakePlane(5.0, 1.0, -320.0, -300.0, 10.0)};
+        if (withDistractor) {
+            // 외곽 기준 예측 위치(-halfWidth + 290) 바로 아래의 다른 높이 평면.
+            m.planes.push_back(MakePlane(8.0, 1.0, -halfWidth + 280.0, -halfWidth + 300.0, 10.0));
+        }
+        return m;
+    };
+    FakeAdapter adapter;
+    const auto h55 = adapter.Add(makeModel(600.0, false));
+    const auto h65 = adapter.Add(makeModel(700.0, true));
+    const auto box55 = adapter.GetBoundingBox(h55);
+
+    rule::Rule height;
+    height.name = "후크 높이";
+    height.measurementType = rule::MeasurementType::PointToPlane;
+    height.projection = "normal";
+    rule::Anchor tip{"single", "Vertex", "", std::nullopt, std::nullopt};
+    tip.ref = Ref(-290.0, 0.0, 30.0, box55);
+    height.anchors = {tip};
+    rule::PlaneRef shelf{"Datum_Plane", ""};
+    shelf.ref = Ref(-310.0, 0.0, 5.0, box55, geometry::Vec3{0.0, 0.0, 1.0});
+    height.referencePlane = shelf;
+    const auto results = rule::RuleEngine::Evaluate(adapter, {{55, h55}, {65, h65}}, height);
+    Check(results[0].ok && std::abs(results[0].value - 25.0) < 1e-9, "55\" height from the local shelf");
+    Check(results[1].ok && std::abs(results[1].value - 25.0) < 1e-9,
+          "65\" should find the shelf next to the matched tip, not the plane at the outline-predicted spot");
+}
+
+void TestTrendOutlierNeedsFourPointsAndPicksWorst() {
+    const auto outlier = rule::FindTrendOutlier({{43, 10.0}, {50, 10.0}, {55, 10.05}, {65, 10.0}, {75, 13.0}}, 0.5);
+    Check(outlier && outlier->index == 4, "the jumping inch should be the outlier");
+    const auto scaled = rule::FindTrendOutlier({{43, 100.0}, {55, 127.9}, {65, 151.2}, {75, 174.4}}, 0.5);
+    Check(!scaled, "values that grow linearly with inch are consistent");
+    const auto three = rule::FindTrendOutlier({{43, 10.0}, {55, 10.0}, {65, 30.0}}, 0.5);
+    Check(!three, "three points are too few to tell which one jumps");
+}
+
+void TestConsistencyWarningsMarkSuspectValues() {
+    rule::Rule r;
+    r.measurementType = rule::MeasurementType::PointToPoint;
+    r.tolerancePlusMm = 0.1;
+    r.toleranceMinusMm = 0.1;
+    std::vector<rule::InchResult> results(5);
+    const int inches[] = {43, 50, 55, 65, 75};
+    const double values[] = {10.0, 10.0, 10.02, 10.0, 12.0};
+    for (int i = 0; i < 5; ++i) {
+        results[i].inch = inches[i];
+        results[i].value = values[i];
+    }
+    results[1].spec = 8.0; // 도면 스펙 대비 +2mm - 공차(±0.1)의 5배(0.5mm)를 훨씬 넘음
+    results[1].deviation = 2.0;
+    results[3].ok = false;  // 실패한 인치는 추세 계산에서 빠진다
+    rule::RuleEngine::AddConsistencyWarnings(r, results);
+    Check(results[1].warning.find("도면 스펙") != std::string::npos, "far-off value against its spec should warn");
+    Check(results[4].warning.find("추세") != std::string::npos, "the inch that breaks the trend should warn");
+    Check(results[0].warning.empty() && results[2].warning.empty(), "consistent inches should not warn");
+
+    rule::Rule size = r;
+    size.measurementType = rule::MeasurementType::OverallSize;
+    std::vector<rule::InchResult> sizeResults = results;
+    for (auto& result : sizeResults) {
+        result.warning.clear();
+    }
+    rule::RuleEngine::AddConsistencyWarnings(size, sizeResults);
+    Check(sizeResults[1].warning.empty() && sizeResults[4].warning.empty(), "overall size needs no matching check");
+}
+
 } // namespace
 
 int main() {
@@ -453,6 +612,10 @@ int main() {
         {"TestPickUniqueNearestRejectsAmbiguousAndFarCandidates", TestPickUniqueNearestRejectsAmbiguousAndFarCandidates},
         {"TestClickedHolesMatchAcrossInchesAndSpecJudgement", TestClickedHolesMatchAcrossInchesAndSpecJudgement},
         {"TestClickedPlaneAndPointHeightAndGap", TestClickedPlaneAndPointHeightAndGap},
+        {"TestLocalPatchRejectsDifferentFeatureAtPredictedSpot", TestLocalPatchRejectsDifferentFeatureAtPredictedSpot},
+        {"TestLocalReferencePlaneFollowsMatchedPoint", TestLocalReferencePlaneFollowsMatchedPoint},
+        {"TestTrendOutlierNeedsFourPointsAndPicksWorst", TestTrendOutlierNeedsFourPointsAndPicksWorst},
+        {"TestConsistencyWarningsMarkSuspectValues", TestConsistencyWarningsMarkSuspectValues},
     };
     for (const auto& test : tests) {
         try {

@@ -8,6 +8,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -162,13 +163,72 @@ double CosOfDeg(double deg) {
     return std::cos(deg * kPi / 180.0);
 }
 
+geometry::Vec3 Add(const geometry::Vec3& a, const geometry::Vec3& b) {
+    return geometry::Vec3{a.x + b.x, a.y + b.y, a.z + b.z};
+}
+
+geometry::Vec3 Sub(const geometry::Vec3& a, const geometry::Vec3& b) {
+    return geometry::Vec3{a.x - b.x, a.y - b.y, a.z - b.z};
+}
+
+// § 국부 기준(측정면 원칙 3) - 기준 인치에서 first → second가 가까우면, 다른 인치에서 매칭된 first
+// 위치에서 같은 상대 거리만큼 옮긴 자리를 second의 예측 위치로 쓴다. 멀면 nullopt(외곽 기준 예측).
+std::optional<geometry::Vec3> LocalPrediction(const RefGeometry& firstRef, const geometry::Vec3& matchedFirst,
+                                              const RefGeometry& secondRef) {
+    if (!IsLocalReference(firstRef.position, secondRef.position, firstRef.sourceBox)) {
+        return std::nullopt;
+    }
+    return Add(matchedFirst, Sub(secondRef.position, firstRef.position));
+}
+
+// § 주변 지문 검증 - 위치로 고른 자리(probe) 주변 형상이 기준 인치의 지문과 같은지 본다. 지문이 없는
+// 예전 규칙/실 형상이 없는 어댑터는 건너뛴다.
+void VerifyLocalPatch(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
+                      const RefGeometry& ref, const geometry::Vec3& probe, const std::string& label) {
+    if (!ref.localPatch.has_value()) {
+        return;
+    }
+    const geometry::FeaturePatchCapture capture = adapter.CaptureLocalPatch(handle, probe, ref.localPatchRadiusMm);
+    if (!capture.valid) {
+        throw std::runtime_error(label + ": 매칭된 위치의 주변 형상을 읽을 수 없음");
+    }
+    const double similarity = geometry::PatchSimilarity(*ref.localPatch, capture.descriptor);
+    if (similarity < kLocalPatchMinSimilarity) {
+        std::ostringstream msg;
+        msg.precision(2);
+        msg << std::fixed << label << ": 주변 형상이 기준 인치와 다름 (유사도 " << similarity << " < "
+            << kLocalPatchMinSimilarity << ")";
+        throw std::runtime_error(msg.str());
+    }
+}
+
+// 평면 위에서 지문을 뜰 자리 - near를 그 면의 범위(faceBox) 안으로 당긴 뒤 평면에 내린다. 기준
+// 인치에서는 클릭 점, 다른 인치에서는 예측 위치가 near라서 양쪽이 "같은 자리"를 가리킨다.
+geometry::Vec3 PlaneProbePoint(const geometry::PlaneCandidate& plane, const geometry::Vec3& near) {
+    geometry::Vec3 p = near;
+    if (plane.hasFaceBox) {
+        p.x = std::clamp(p.x, plane.faceBox.min.x, plane.faceBox.max.x);
+        p.y = std::clamp(p.y, plane.faceBox.min.y, plane.faceBox.max.y);
+        p.z = std::clamp(p.z, plane.faceBox.min.z, plane.faceBox.max.z);
+    }
+    const double len = Length(plane.normal);
+    if (len < 1e-12) {
+        return p;
+    }
+    const double offset = Dot(Sub(p, plane.pointOnPlane), plane.normal) / (len * len);
+    return geometry::Vec3{p.x - plane.normal.x * offset, p.y - plane.normal.y * offset, p.z - plane.normal.z * offset};
+}
+
 // § 인치 간 자동 매칭 - 클릭 좌표를 이 모델로 옮겨 그 근처의 유일한 후보를 고른다. 형상
 // 조건(종류/지름/축 방향)으로 먼저 거른 뒤 위치로 고르므로, 위치가 비슷해도 다른 형상은 안
-// 잡힌다. 실패하면 사유를 담아 던진다(Evaluate가 인치별 오류로 기록).
-geometry::AnchorCandidate MatchAnchorByRef(
-    const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, const Anchor& anchor) {
+// 잡힌다. 고른 뒤 주변 지문까지 확인한다. 실패하면 사유를 담아 던진다(Evaluate가 인치별 오류로
+// 기록). predictedOverride가 있으면(국부 기준) 외곽 기준 예측 대신 그 위치에서 찾는다.
+geometry::AnchorCandidate MatchAnchorByRef(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
+                                           const Anchor& anchor,
+                                           const std::optional<geometry::Vec3>& predictedOverride = std::nullopt) {
     const geometry::BoundingBox targetBox = adapter.GetBoundingBox(handle);
-    const geometry::Vec3 predicted = PredictPosition(anchor.ref->position, anchor.ref->sourceBox, targetBox);
+    const geometry::Vec3 predicted = predictedOverride.value_or(
+        PredictPosition(anchor.ref->position, anchor.ref->sourceBox, targetBox));
     const double radius = MatchRadiusMm(targetBox);
 
     std::vector<geometry::AnchorCandidate> candidates;
@@ -196,17 +256,25 @@ geometry::AnchorCandidate MatchAnchorByRef(
     if (!match.index) {
         throw std::runtime_error(AnchorLabel(anchor) + ": " + match.error);
     }
+    VerifyLocalPatch(adapter, handle, *anchor.ref, candidates[*match.index].position, AnchorLabel(anchor));
     return candidates[*match.index];
 }
 
+struct PlaneMatch {
+    geometry::PlaneCandidate plane;
+    geometry::Vec3 probe; // 예측 위치를 그 면 위로 옮긴 점(지문 검증 자리, 국부 기준의 출발점)
+};
+
 // 클릭 좌표 기준 평면 고르기 - 무한 평면이 아니라 실제 면(faceBox)까지의 거리로 고르고, 클릭한
 // 면의 법선(부호 포함)과 같은 방향인 면만 본다(판재 앞/뒷면 구분). 같은 평면 위에 나뉜 면들은
-// 어느 것을 골라도 거리 계산이 같으므로 하나로 취급한다.
-geometry::PlaneCandidate MatchPlaneByRef(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
-                                         const RefGeometry& ref, std::vector<geometry::PlaneCandidate> planes,
-                                         const std::string& label) {
+// 어느 것을 골라도 거리 계산이 같으므로 하나로 취급한다. 고른 뒤 주변 지문까지 확인한다.
+PlaneMatch MatchPlaneByRef(const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle,
+                           const RefGeometry& ref, std::vector<geometry::PlaneCandidate> planes,
+                           const std::string& label,
+                           const std::optional<geometry::Vec3>& predictedOverride = std::nullopt) {
     const geometry::BoundingBox targetBox = adapter.GetBoundingBox(handle);
-    const geometry::Vec3 predicted = PredictPosition(ref.position, ref.sourceBox, targetBox);
+    const geometry::Vec3 predicted =
+        predictedOverride.value_or(PredictPosition(ref.position, ref.sourceBox, targetBox));
     const double cosTolerance = CosOfDeg(kNormalMatchToleranceDeg);
     if (ref.normal.has_value()) {
         planes.erase(std::remove_if(planes.begin(), planes.end(),
@@ -232,7 +300,9 @@ geometry::PlaneCandidate MatchPlaneByRef(const geometry::IGeometryAdapter& adapt
     if (!match.index) {
         throw std::runtime_error(label + ": " + match.error);
     }
-    return planes[*match.index];
+    PlaneMatch result{planes[*match.index], PlaneProbePoint(planes[*match.index], predicted)};
+    VerifyLocalPatch(adapter, handle, ref, result.probe, label);
+    return result;
 }
 
 // anchor 하나를 확정한다(point_to_plane의 점 등). 클릭 좌표가 있으면 매칭, 없으면 예전 selector 방식.
@@ -260,7 +330,10 @@ std::pair<geometry::AnchorCandidate, geometry::AnchorCandidate> ResolveAnchorPai
     const Anchor& anchorA = rule.anchors[0];
     const Anchor& anchorB = rule.anchors[1];
     if (anchorA.ref.has_value() && anchorB.ref.has_value()) {
-        return {MatchAnchorByRef(adapter, handle, anchorA), MatchAnchorByRef(adapter, handle, anchorB)};
+        // 국부 기준 - B가 A 근처면 매칭된 A에서의 상대 위치로 B를 찾는다(측정면 원칙 3).
+        const auto a = MatchAnchorByRef(adapter, handle, anchorA);
+        const auto b = MatchAnchorByRef(adapter, handle, anchorB, LocalPrediction(*anchorA.ref, a.position, *anchorB.ref));
+        return {a, b};
     }
     if (anchorA.ref.has_value() || anchorB.ref.has_value()) {
         // 한쪽만 클릭 좌표가 있으면(예: 클릭 점 + 이름 있는 프리셋) 그쪽을 먼저 확정하고,
@@ -341,7 +414,15 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
                 std::move(planes), rule.referencePlane->normalAxis, rule.referencePlane->normalToleranceDeg);
             geometry::PlaneCandidate plane;
             if (rule.referencePlane->ref.has_value()) {
-                plane = MatchPlaneByRef(adapter, handle, *rule.referencePlane->ref, std::move(planes), "기준 평면");
+                // 국부 기준면(측정면 원칙 3) - 높이/단차의 기준면이 점 근처면 매칭된 점에서의 상대
+                // 위치로 찾는다. 외곽 기준으로 찾으면 인치가 커질 때 다른 평면을 잡을 수 있다.
+                std::optional<geometry::Vec3> local;
+                if (rule.anchors[0].ref.has_value()) {
+                    local = LocalPrediction(*rule.anchors[0].ref, resolved.position, *rule.referencePlane->ref);
+                }
+                plane = MatchPlaneByRef(adapter, handle, *rule.referencePlane->ref, std::move(planes), "기준 평면",
+                                        local)
+                            .plane;
             } else {
                 // 예전 규칙(클릭 좌표 없음) - 어느 평면인지 알 방법이 없어 첫 후보를 쓴다.
                 if (planes.empty()) {
@@ -365,8 +446,12 @@ double EvaluateSingleModel(const geometry::IGeometryAdapter& adapter, geometry::
                     throw std::runtime_error("face_to_face_gap은 평면 두 개를 클릭해야 함");
                 }
                 const auto planes = adapter.FindPlaneCandidates(handle, "Datum_Plane", std::string());
-                const auto planeA = MatchPlaneByRef(adapter, handle, *anchorA.ref, planes, "면 A");
-                const auto planeB = MatchPlaneByRef(adapter, handle, *anchorB.ref, planes, "면 B");
+                const auto matchA = MatchPlaneByRef(adapter, handle, *anchorA.ref, planes, "면 A");
+                const auto planeA = matchA.plane;
+                const auto planeB =
+                    MatchPlaneByRef(adapter, handle, *anchorB.ref, planes, "면 B",
+                                    LocalPrediction(*anchorA.ref, matchA.probe, *anchorB.ref))
+                        .plane;
                 const double cosAngle = std::abs(CosBetween(planeA.normal, planeB.normal));
                 if (cosAngle < CosOfDeg(kParallelFaceToleranceDeg)) {
                     throw std::runtime_error("두 면이 평행하지 않음 - 평행하지 않은 면 사이 최단거리는 아직 미지원");
@@ -469,7 +554,98 @@ std::vector<InchResult> RuleEngine::Evaluate(
         results.push_back(std::move(result));
     }
 
+    AddConsistencyWarnings(rule, results);
     return results;
+}
+
+void RuleEngine::AddConsistencyWarnings(const Rule& rule, std::vector<InchResult>& results) {
+    // 전장 사이즈는 매칭 없이 bbox에서 바로 계산하므로 "엉뚱한 형상을 잡을" 일이 없다.
+    if (rule.measurementType == MeasurementType::OverallSize) {
+        return;
+    }
+    const double band = std::max(rule.tolerancePlusMm, rule.toleranceMinusMm);
+    const double allowed = std::max(kSuspectToleranceMultiple * band, kSuspectMinDeviationMm);
+
+    for (auto& result : results) {
+        if (result.ok && result.spec.has_value() && std::abs(result.deviation) > allowed) {
+            std::ostringstream msg;
+            msg.precision(3);
+            msg << std::fixed << "도면 스펙과 차이가 큼(" << result.deviation
+                << " mm) - 다른 형상을 잡았는지 확인";
+            result.warning = msg.str();
+        }
+    }
+
+    // 형상 개수는 인치가 커지면 계단식으로 늘어나는 게 정상이라 직선 추세로 볼 수 없다.
+    if (rule.measurementType == MeasurementType::InstanceCount) {
+        return;
+    }
+    std::vector<std::pair<int, double>> points;
+    std::vector<std::size_t> indices;
+    for (std::size_t i = 0; i < results.size(); ++i) {
+        if (results[i].ok) {
+            points.emplace_back(results[i].inch, results[i].value);
+            indices.push_back(i);
+        }
+    }
+    const auto outlier = FindTrendOutlier(points, allowed);
+    if (!outlier) {
+        return;
+    }
+    InchResult& suspect = results[indices[outlier->index]];
+    // 도면 스펙이 있는 인치는 위에서 도면 스펙 기준으로 이미 봤다(설계상 추세를 안 따를 수도 있음).
+    if (suspect.spec.has_value() || !suspect.warning.empty()) {
+        return;
+    }
+    std::ostringstream msg;
+    msg.precision(3);
+    msg << std::fixed << "다른 인치들의 추세와 다름(추세상 " << outlier->predicted << " mm) - 다른 형상을 잡았는지 확인";
+    suspect.warning = msg.str();
+}
+
+void RuleEngine::FinalizeAnchorRef(
+    const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, Anchor& anchor) {
+    if (!anchor.ref.has_value()) {
+        return;
+    }
+    // 기준 인치에서는 지문 검증 없이(아직 지문이 없거나 예전 것) 평가와 같은 방법으로 매칭한다.
+    Anchor probe = anchor;
+    probe.ref->localPatch.reset();
+    geometry::AnchorCandidate matched;
+    try {
+        matched = MatchAnchorByRef(adapter, handle, probe);
+    } catch (const std::exception&) {
+        return; // 기준 인치에서도 못 찾으면 평가할 때 같은 사유로 실패가 표시된다.
+    }
+    anchor.ref->position = matched.position;
+    const auto capture = adapter.CaptureLocalPatch(handle, matched.position, kLocalPatchRadiusMm);
+    if (capture.valid) {
+        anchor.ref->localPatch = capture.descriptor;
+        anchor.ref->localPatchRadiusMm = kLocalPatchRadiusMm;
+    } else {
+        anchor.ref->localPatch.reset();
+    }
+}
+
+void RuleEngine::FinalizePlaneRef(
+    const geometry::IGeometryAdapter& adapter, geometry::ModelHandle handle, RefGeometry& ref) {
+    RefGeometry probe = ref;
+    probe.localPatch.reset();
+    geometry::Vec3 probePoint;
+    try {
+        probePoint = MatchPlaneByRef(adapter, handle, probe,
+                                     adapter.FindPlaneCandidates(handle, "Datum_Plane", std::string()), "평면")
+                         .probe;
+    } catch (const std::exception&) {
+        return;
+    }
+    const auto capture = adapter.CaptureLocalPatch(handle, probePoint, kLocalPatchRadiusMm);
+    if (capture.valid) {
+        ref.localPatch = capture.descriptor;
+        ref.localPatchRadiusMm = kLocalPatchRadiusMm;
+    } else {
+        ref.localPatch.reset();
+    }
 }
 
 std::optional<geometry::Vec3> RuleEngine::ResolveAnchorPosition(

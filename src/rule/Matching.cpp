@@ -89,4 +89,51 @@ MatchResult PickUniqueNearest(const std::vector<double>& distances,
     return result;
 }
 
+bool IsLocalReference(const geometry::Vec3& first, const geometry::Vec3& second, const geometry::BoundingBox& sourceBox) {
+    const double dx = sourceBox.max.x - sourceBox.min.x;
+    const double dy = sourceBox.max.y - sourceBox.min.y;
+    const double dz = sourceBox.max.z - sourceBox.min.z;
+    const double diagonal = std::sqrt(dx * dx + dy * dy + dz * dz);
+    const double ox = second.x - first.x;
+    const double oy = second.y - first.y;
+    const double oz = second.z - first.z;
+    return std::sqrt(ox * ox + oy * oy + oz * oz) <= diagonal * kLocalReferenceMaxRatio;
+}
+
+std::optional<TrendOutlier> FindTrendOutlier(const std::vector<std::pair<int, double>>& points, double allowedMm) {
+    if (points.size() < kMinTrendPoints) {
+        return std::nullopt;
+    }
+    std::optional<TrendOutlier> worst;
+    double worstRatio = 1.0;
+    for (std::size_t i = 0; i < points.size(); ++i) {
+        // 나머지 점들로 value = a + b·inch 최소제곱 - 인치가 전부 같으면(분산 0) 평균값.
+        double sumX = 0.0, sumY = 0.0, sumXX = 0.0, sumXY = 0.0;
+        double n = 0.0;
+        for (std::size_t j = 0; j < points.size(); ++j) {
+            if (j == i) {
+                continue;
+            }
+            const double x = points[j].first;
+            const double y = points[j].second;
+            sumX += x;
+            sumY += y;
+            sumXX += x * x;
+            sumXY += x * y;
+            n += 1.0;
+        }
+        const double varX = sumXX - sumX * sumX / n;
+        const double slope = std::abs(varX) < 1e-12 ? 0.0 : (sumXY - sumX * sumY / n) / varX;
+        const double intercept = (sumY - slope * sumX) / n;
+        const double predicted = intercept + slope * points[i].first;
+        const double allowed = std::max({allowedMm, std::abs(predicted) * kSuspectTrendRatio, 1e-9});
+        const double ratio = std::abs(points[i].second - predicted) / allowed;
+        if (ratio > worstRatio) {
+            worstRatio = ratio;
+            worst = TrendOutlier{i, predicted};
+        }
+    }
+    return worst;
+}
+
 } // namespace rule

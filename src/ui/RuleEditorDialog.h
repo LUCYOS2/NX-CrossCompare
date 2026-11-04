@@ -205,6 +205,9 @@ private:
     // 새 포인트를 리스트에 추가 - 최대 2개까지(그 이상 필요한 측정 타입이 없음). 초과
     // 시도하면 안내만 하고 무시한다.
     void AddPoint(const PointEntry& entry);
+    // § 주변 지문 검증(2026-11-04) - 새로 지정한 포인트의 entry.ref를 기준 인치 모델(handle)에서
+    // 확정한다(RuleEngine::FinalizeAnchorRef/FinalizePlaneRef - 실제 형상 위치 + 주변 지문).
+    void FinalizePointRef(PointEntry& entry, geometry::ModelHandle handle) const;
     // "다음 추가할 포인트"에 적용할 축 방향 필터 값 - "(필터 안 씀)"이면 빈 문자열.
     std::string CurrentDirectionFilter() const;
     // 포인트 A/B가 둘 다 채워졌으면(원통/평면 조합으로) 측정타입을 자동으로 맞춰준다.

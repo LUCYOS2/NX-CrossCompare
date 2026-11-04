@@ -168,6 +168,51 @@ std::vector<TopoDS_Face> ExtractFeaturePatch(
     return patch;
 }
 
+std::vector<TopoDS_Face> ExtractLocalPatch(const TopTools_IndexedDataMapOfShapeListOfShape& edgeFaceMap,
+                                           const TopoDS_Face& seedFace, const gp_Pnt& center, double radius) {
+    const auto withinRadius = [&center, radius](const TopoDS_Face& face) {
+        Bnd_Box box;
+        BRepBndLib::Add(face, box);
+        if (box.IsVoid()) {
+            return false;
+        }
+        double xmin, ymin, zmin, xmax, ymax, zmax;
+        box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+        const double dx = std::max({xmin - center.X(), 0.0, center.X() - xmax});
+        const double dy = std::max({ymin - center.Y(), 0.0, center.Y() - ymax});
+        const double dz = std::max({zmin - center.Z(), 0.0, center.Z() - zmax});
+        return dx * dx + dy * dy + dz * dz <= radius * radius;
+    };
+
+    std::vector<TopoDS_Face> patch;
+    TopTools_MapOfShape visited;
+    std::deque<TopoDS_Face> queue;
+    queue.push_back(seedFace);
+    visited.Add(seedFace);
+    while (!queue.empty()) {
+        const TopoDS_Face current = queue.front();
+        queue.pop_front();
+        patch.push_back(current);
+        for (TopExp_Explorer edgeExp(current, TopAbs_EDGE); edgeExp.More(); edgeExp.Next()) {
+            const TopoDS_Edge& edge = TopoDS::Edge(edgeExp.Current());
+            if (!edgeFaceMap.Contains(edge)) {
+                continue;
+            }
+            for (TopTools_ListOfShape::Iterator it(edgeFaceMap.FindFromKey(edge)); it.More(); it.Next()) {
+                const TopoDS_Face neighbor = TopoDS::Face(it.Value());
+                if (visited.Contains(neighbor)) {
+                    continue;
+                }
+                visited.Add(neighbor);
+                if (withinRadius(neighbor)) {
+                    queue.push_back(neighbor);
+                }
+            }
+        }
+    }
+    return patch;
+}
+
 FeaturePatchDescriptor ComputePatchDescriptor(const std::vector<TopoDS_Face>& patch) {
     FeaturePatchDescriptor descriptor;
     descriptor.faceCount = static_cast<int>(patch.size());
