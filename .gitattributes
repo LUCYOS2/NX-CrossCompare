@@ -1,0 +1,4 @@
+# cmd는 LF 줄바꿈 배치 파일에서 goto/call 라벨을 잘못 찾는 경우가 있어, 어느 PC의 git 설정으로
+# 받든 항상 CRLF로 체크아웃되게 한다(scripts/run_diag_matching.bat 등).
+*.bat text eol=crlf
+*.cmd text eol=crlf
