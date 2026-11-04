@@ -69,6 +69,10 @@ public:
     // 피킹/캡쳐영역 체크보다 나중에 검사 - mouseMoveEvent/wheelEvent 참고).
     void SetCameraLockedPtr(const bool* cameraLocked) { cameraLockedPtr_ = cameraLocked; }
 
+    // § F1/F2/F3 조작 모드(2026-11-04) - MultiViewportPanel이 소유한 모드 값을 가리킨다. 왼쪽 드래그가
+    // 이동/확대축소/회전 중 무엇을 할지 정한다(pickModeActive_와 같은 "패널 소유, 포인터로 공유" 패턴).
+    void SetMouseDragModePtr(const MouseDragMode* mouseDragMode) { mouseDragMode_ = mouseDragMode; }
+
     void SetCaptureRegionModePtr(const bool* captureRegionModeActive) {
         captureRegionModeActive_ = captureRegionModeActive;
     }
@@ -196,6 +200,12 @@ private:
     // 섹션 뷰/렌더모드는 이 함수를 거치지 않고 항상 sharedCamera_를 직접 읽는다(전체 공통).
     Camera* ActiveTransform();
     const Camera* ActiveTransform() const;
+    // 왼쪽 드래그 한 번(delta)을 현재 조작 모드(mouseDragMode_)대로 transform에 반영한다 - 일반 조작과
+    // 피킹 모드 중 조작이 같은 규칙을 쓰도록 공용화.
+    void ApplyLeftDrag(Camera* transform, const QPoint& delta) const;
+    // 면 하이라이트(주황/초록) 그리기 전후의 GL 상태 - 단면 중이면 보이는 면에만 칠한다(cpp 주석 참고).
+    void BeginFaceHighlightPass();
+    void EndFaceHighlightPass();
 
     geometry::IGeometryAdapter* adapter_;
     geometry::ModelHandle handle_;
@@ -213,6 +223,7 @@ private:
     bool pickDidDrag_ = false;    // 임계값을 넘게 움직였으면 true - "클릭"이 아니라 "드래그"였다는 확정
     QRubberBand* pickRegionRubberBand_ = nullptr; // 드래그가 임계값을 넘을 때만 lazy 생성
     const bool* cameraLockedPtr_ = nullptr;    // MultiViewportPanel 소유, RuleEditorDialog가 켬/끔
+    const MouseDragMode* mouseDragMode_ = nullptr; // MultiViewportPanel 소유, F1/F2/F3로 바뀜(null이면 회전)
     QPoint lastMousePos_;
     QRubberBand* rubberBand_ = nullptr; // 캡쳐 영역 드래그 중에만 lazy 생성
     QPoint captureDragStart_;

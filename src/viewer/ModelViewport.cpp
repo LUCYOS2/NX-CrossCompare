@@ -125,6 +125,11 @@ void main() {
         return;
     }
     if (isHoverFacePass) {
+        // § 단면 중 하이라이트(2026-11-04) - 잘려나간 쪽 면까지 칠하면 단면 위에 겹쳐 그려져
+        // 캡이 가려지고 속이 빈 것처럼 보였다(형상 프리셋 창 리포트). 일반 면과 같은 기준으로 자른다.
+        if (sectionEnabled && (vWorldPos[sectionAxis] - sectionCoord) * sectionSign < 0.0) {
+            discard;
+        }
         fragColor = vec4(markerColor, 0.35);
         return;
     }
@@ -586,6 +591,33 @@ void ModelViewport::SetDimensionLine(const std::vector<QVector3D>& worldPoints) 
     update();
 }
 
+// § 단면 중 하이라이트(2026-11-04) - 면 하이라이트(마우스 위 주황/캡처된 프리셋 초록)는 원래 "가려져도
+// 보이게" 깊이 검사를 끄고 그렸다. 그런데 단면 보기 중에는 그러면 잘려나간 쪽과 뒤쪽 안쪽 면까지 단면
+// 캡 위에 반투명으로 겹쳐져, 캡이 안 보이고 속이 빈 SURFACE BODY처럼 보였다(형상 프리셋 창 리포트).
+// 단면 중에만 깊이 검사를 켜서(쓰기는 안 함, 같은 테셀레이션이라 LEQUAL + 살짝 앞으로 당김) 실제로
+// 보이는 면에만 칠하고, 잘려나간 쪽은 셰이더가 지운다. 단면이 꺼져 있으면 예전처럼 항상 위에 그린다.
+void ModelViewport::BeginFaceHighlightPass() {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    if (sharedCamera_->sectionEnabled) {
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LEQUAL);
+        glDepthMask(GL_FALSE);
+        glEnable(GL_POLYGON_OFFSET_FILL);
+        glPolygonOffset(-1.0f, -1.0f);
+    } else {
+        glDisable(GL_DEPTH_TEST);
+    }
+}
+
+void ModelViewport::EndFaceHighlightPass() {
+    glDisable(GL_POLYGON_OFFSET_FILL);
+    glDepthMask(GL_TRUE);
+    glDepthFunc(GL_LESS);
+    glDisable(GL_BLEND);
+    glEnable(GL_DEPTH_TEST);
+}
+
 Camera* ModelViewport::ActiveTransform() {
     return (independentModePtr_ && *independentModePtr_) ? &localCamera_ : sharedCamera_;
 }
@@ -818,17 +850,14 @@ void ModelViewport::paintGL() {
             hoverFaceVbo_.allocate(faceData.data(), static_cast<int>(faceData.size() * sizeof(float)));
             hoverFaceVbo_.release();
 
-            glDisable(GL_DEPTH_TEST);
-            glEnable(GL_BLEND);
-            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            BeginFaceHighlightPass();
             program_.setUniformValue("isHoverFacePass", true);
             program_.setUniformValue("markerColor", QVector3D(1.0f, 0.55f, 0.0f)); // 밝은 주황
             hoverFaceVao_.bind();
             glDrawArrays(GL_TRIANGLES, 0, static_cast<int>(hoverFaceTriangles_.size()));
             hoverFaceVao_.release();
             program_.setUniformValue("isHoverFacePass", false);
-            glDisable(GL_BLEND);
-            glEnable(GL_DEPTH_TEST);
+            EndFaceHighlightPass();
         }
         if (!hoverEdgeSegments_.empty()) {
             std::vector<float> edgeData;
@@ -859,17 +888,14 @@ void ModelViewport::paintGL() {
     // 계속 보여야 함). 색을 초록으로 구분해서 "지금 마우스가 가리키는 것"(주황)과
     // "이미 확정된 캡처"(초록)를 헷갈리지 않게 한다.
     if (!capturedFaceTriangles_.empty()) {
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_BLEND);
-        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+        BeginFaceHighlightPass();
         program_.setUniformValue("isHoverFacePass", true);
         program_.setUniformValue("markerColor", QVector3D(0.15f, 0.85f, 0.25f)); // 초록
         capturedFaceVao_.bind();
         glDrawArrays(GL_TRIANGLES, 0, static_cast<int>(capturedFaceTriangles_.size()));
         capturedFaceVao_.release();
         program_.setUniformValue("isHoverFacePass", false);
-        glDisable(GL_BLEND);
-        glEnable(GL_DEPTH_TEST);
+        EndFaceHighlightPass();
     }
 
     vao_.release();
@@ -1064,8 +1090,12 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
         if (pickDragActive_ && (event->pos() - pickDragStart_).manhattanLength() > kPickDragThresholdPx) {
             pickDidDrag_ = true;
         }
+        // § Ctrl/Shift 드래그(2026-11-04) - "Ctrl+왼쪽 드래그 = 선택, Shift+왼쪽 = 선택 해제"
+        // 요청. Shift만 눌러도 사각형이 시작되고(뗄 때 shiftHeld=true로 나가 해제), 예전 Ctrl+Shift도
+        // 그대로 해제로 동작한다.
         if (pickDidDrag_ && regionSelectModeActive_ && *regionSelectModeActive_ &&
-            (event->modifiers() & Qt::ControlModifier) && (event->buttons() & Qt::LeftButton)) {
+            (event->modifiers() & (Qt::ControlModifier | Qt::ShiftModifier)) &&
+            (event->buttons() & Qt::LeftButton)) {
             if (!pickRegionRubberBand_) {
                 pickRegionRubberBand_ = new QRubberBand(QRubberBand::Rectangle, this);
             }
@@ -1082,8 +1112,7 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
         if (!(cameraLockedPtr_ && *cameraLockedPtr_) && (event->buttons() & (Qt::LeftButton | Qt::RightButton))) {
             Camera* transform = ActiveTransform();
             if (event->buttons() & Qt::LeftButton) {
-                transform->yawDeg += delta.x() * 0.5f;
-                transform->pitchDeg += delta.y() * 0.5f;
+                ApplyLeftDrag(transform, delta);
             } else {
                 transform->panX += delta.x() * 1.0f;
                 transform->panY -= delta.y() * 1.0f;
@@ -1175,8 +1204,7 @@ void ModelViewport::mouseMoveEvent(QMouseEvent* event) {
     }
     Camera* transform = ActiveTransform();
     if (event->buttons() & Qt::LeftButton) {
-        transform->yawDeg += delta.x() * 0.5f;
-        transform->pitchDeg += delta.y() * 0.5f;
+        ApplyLeftDrag(transform, delta);
     } else if (event->buttons() & Qt::RightButton) {
         transform->panX += delta.x() * 1.0f;
         transform->panY -= delta.y() * 1.0f;
@@ -1290,6 +1318,24 @@ QPixmap ModelViewport::grabViewportPixmap() {
     QImage image = grabFramebuffer();
     image.setDevicePixelRatio(devicePixelRatioF());
     return QPixmap::fromImage(image);
+}
+
+void ModelViewport::ApplyLeftDrag(Camera* transform, const QPoint& delta) const {
+    const MouseDragMode mode = mouseDragMode_ ? *mouseDragMode_ : MouseDragMode::Rotate;
+    switch (mode) {
+        case MouseDragMode::Pan:
+            transform->panX += delta.x() * 1.0f;
+            transform->panY -= delta.y() * 1.0f;
+            break;
+        case MouseDragMode::Zoom:
+            // 위로 끌면(delta.y<0) 확대, 아래로 끌면 축소 - 픽셀당 1%씩, 곱셈이라 크기와 무관하게 같은 체감.
+            transform->distance *= std::exp(delta.y() * 0.01f);
+            break;
+        case MouseDragMode::Rotate:
+            transform->yawDeg += delta.x() * 0.5f;
+            transform->pitchDeg += delta.y() * 0.5f;
+            break;
+    }
 }
 
 void ModelViewport::wheelEvent(QWheelEvent* event) {

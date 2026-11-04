@@ -15,6 +15,7 @@
 
 class QCheckBox;
 class QDoubleSpinBox;
+class QLabel;
 class QPushButton;
 class QSlider;
 
@@ -32,6 +33,7 @@ public:
     MultiViewportPanel(geometry::IGeometryAdapter* adapter,
                         const std::vector<std::pair<std::string, geometry::ModelHandle>>& models,
                         QWidget* parent = nullptr);
+    ~MultiViewportPanel() override;
 
     // § 화면설정 - MainWindow가 메뉴 액션에서 호출. 이 패널은 STEP 재로드마다 새로
     // 만들어지므로, MainWindow는 마지막으로 고른 값을 기억해뒀다가 매번 재적용해야 한다.
@@ -82,6 +84,17 @@ public:
     void snapToNegYZView();
     void snapToXZView();
     void snapToNegXZView();
+    // § -ISO / TRIMETRIC(2026-11-04) - 요청으로 추가.
+    //   -ISO     : ISO와 정확히 반대 방향(-XY가 XY의 반대인 것과 같은 규칙) - yaw=-135, pitch=-35.264,
+    //              worldDir=(-1,1,1)/√3. 반대쪽 아래 모서리에서 올려다보는 그림이라 -XZ처럼 pitch<0이 맞다.
+    //   TRIMETRIC: 세 축이 서로 다르게 줄어 보이는 각도(yaw=30, pitch=20) - ISO보다 정면에 가깝고
+    //              덜 내려다봐서 앞면 형상이 잘 보인다.
+    void resetToNegIsoView();
+    void resetToTrimetricView();
+    // § F4(2026-11-04) - 지금 보는 방향과 가장 가까운 직교 뷰(XY/-XY/YZ/-YZ/XZ/-XZ)로 맞춘다.
+    void snapToNearestView();
+    // § F1/F2/F3(2026-11-04) - 왼쪽 드래그 동작(이동/확대축소/회전)을 바꾼다(Camera.h MouseDragMode).
+    void setMouseDragMode(MouseDragMode mode);
 
     // § 이미지 캡쳐 뷰어 설정 - "뷰어 전체 캡쳐라 배경이 너무 많다"는 피드백에 따라,
     // 툴바/라벨을 뺀 "현재 마우스가 올라가 있는(또는 마지막으로 올라갔던) 뷰포트"만
@@ -192,6 +205,13 @@ private:
     // § 뷰어 카메라 잠금 - setCameraLocked()로 켜고 끄며, 각 ModelViewport에 포인터로
     // 공유한다(pickModeActive_와 같은 패턴).
     bool cameraLocked_ = false;
+    // § F1/F2/F3 조작 모드 - "모든 창에서 유지되게" 요청(2026-11-04)으로 앱 전체가 하나를 공유한다
+    // (메인 화면/규칙 관리/형상 프리셋 뷰어, STEP 다시 불러오기 후에도 그대로). 각 ModelViewport가 이
+    // 값을 포인터로 읽고, 바뀌면 살아 있는 모든 패널의 안내 문구를 다시 쓴다(s_livePanels).
+    inline static MouseDragMode s_mouseDragMode = MouseDragMode::Rotate;
+    inline static std::vector<MultiViewportPanel*> s_livePanels;
+    void refreshMouseDragModeLabel();
+    QLabel* mouseDragModeLabel_ = nullptr; // 뷰 프리셋 줄 오른쪽 - 지금 모드와 단축키 안내
 
     QCheckBox* sectionEnableCheck_ = nullptr;
     QPushButton* axisButtons_[3] = {nullptr, nullptr, nullptr};

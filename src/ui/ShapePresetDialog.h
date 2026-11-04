@@ -72,6 +72,8 @@ private:
     // 자동 캡처/수동 완료 둘 다 결과(FeaturePatchCapture)를 똑같이 반영해야 해서 공용화.
     void ApplyCapture(geometry::ModelHandle handle, const geometry::FeaturePatchCapture& capture);
     void UpdateManualSelectionHighlight();
+    // § Ctrl+드래그 바로 선택(2026-11-04) - 다른 작업 중이 아니면 피킹 + 사각형 선택을 켜 둔다(cpp 주석 참고).
+    void ArmIdleSelection();
     // shiftHeld==false면 manualSelectedFaces_에 없을 때만 추가, true면 있으면 제거 -
     // 클릭 한 번(onFacePicked)과 드래그 영역(onFacesInRegionPicked) 양쪽이 공유.
     void ToggleManualFace(int faceIndex, bool shiftHeld);

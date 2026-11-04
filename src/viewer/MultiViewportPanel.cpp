@@ -91,6 +91,7 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
         viewport->SetCaptureRegionModePtr(&captureRegionModeActive_);
         viewport->SetRegionSelectModePtr(&regionSelectModeActive_);
         viewport->SetCameraLockedPtr(&cameraLocked_);
+        viewport->SetMouseDragModePtr(&s_mouseDragMode);
         viewports_.push_back(viewport);
 
         vbox->addWidget(labelWidget);
@@ -136,6 +137,11 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
     updateSectionRangeForAxis(camera_.sectionAxis);
     syncSectionControlsFromCamera();
     setupShortcuts();
+    s_livePanels.push_back(this);
+}
+
+MultiViewportPanel::~MultiViewportPanel() {
+    s_livePanels.erase(std::remove(s_livePanels.begin(), s_livePanels.end(), this), s_livePanels.end());
 }
 
 // H/X/Y/Z/+/- 단축키 - QShortcut(Qt::WidgetWithChildrenShortcut)이라 이 패널(컨트롤 바
@@ -183,6 +189,11 @@ void MultiViewportPanel::setupShortcuts() {
 
     addShortcut(QKeySequence(Qt::Key_F), [this]() { fitToView(); });
     addShortcut(QKeySequence(Qt::Key_I), [this]() { resetToIsoView(); });
+    // § F1/F2/F3/F4(2026-11-04) - 왼쪽 드래그 조작 모드 전환 + 가장 가까운 직교 뷰로 정렬.
+    addShortcut(QKeySequence(Qt::Key_F1), [this]() { setMouseDragMode(MouseDragMode::Pan); });
+    addShortcut(QKeySequence(Qt::Key_F2), [this]() { setMouseDragMode(MouseDragMode::Zoom); });
+    addShortcut(QKeySequence(Qt::Key_F3), [this]() { setMouseDragMode(MouseDragMode::Rotate); });
+    addShortcut(QKeySequence(Qt::Key_F4), [this]() { snapToNearestView(); });
     addShortcut(QKeySequence(Qt::Key_H), [this]() {
         if (hoveredViewport_) {
             hoveredViewport_->toggleSection();
@@ -356,7 +367,8 @@ QWidget* MultiViewportPanel::buildViewPresetBar() {
         {"XY", &MultiViewportPanel::snapToXYView},     {"-XY", &MultiViewportPanel::snapToNegXYView},
         {"YZ", &MultiViewportPanel::snapToYZView},     {"-YZ", &MultiViewportPanel::snapToNegYZView},
         {"XZ", &MultiViewportPanel::snapToXZView},     {"-XZ", &MultiViewportPanel::snapToNegXZView},
-        {"ISO", &MultiViewportPanel::resetToIsoView},
+        {"ISO", &MultiViewportPanel::resetToIsoView},  {"-ISO", &MultiViewportPanel::resetToNegIsoView},
+        {"TRIMETRIC", &MultiViewportPanel::resetToTrimetricView},
     };
     for (const auto& preset : presets) {
         auto* button = new QPushButton(preset.label, bar);
@@ -365,7 +377,29 @@ QWidget* MultiViewportPanel::buildViewPresetBar() {
     }
     layout->addStretch(1);
 
+    // § F1/F2/F3/F4 안내 - 키로 모드를 바꾸면 눈에 안 보여서, 지금 왼쪽 드래그가 무엇인지 항상 보여준다.
+    mouseDragModeLabel_ = new QLabel(bar);
+    layout->addWidget(mouseDragModeLabel_);
+    refreshMouseDragModeLabel();
+
     return bar;
+}
+
+void MultiViewportPanel::setMouseDragMode(MouseDragMode mode) {
+    s_mouseDragMode = mode;
+    for (auto* panel : s_livePanels) {
+        panel->refreshMouseDragModeLabel();
+    }
+}
+
+void MultiViewportPanel::refreshMouseDragModeLabel() {
+    if (!mouseDragModeLabel_) {
+        return;
+    }
+    const MouseDragMode mode = s_mouseDragMode;
+    const char* name = mode == MouseDragMode::Pan ? "이동" : (mode == MouseDragMode::Zoom ? "확대/축소" : "회전");
+    mouseDragModeLabel_->setText(
+        QString("왼쪽 드래그: <b>%1</b>  |  F1 이동 · F2 확대/축소 · F3 회전 · F4 가까운 뷰 정렬").arg(name));
 }
 
 // 컨트롤 위젯 상태를 camera_에서 다시 읽어와 맞춘다 - 키보드 단축키로 바뀐 값도
@@ -474,6 +508,49 @@ void MultiViewportPanel::snapToNegXZView() {
     camera_.yawDeg = 0.0f;
     camera_.pitchDeg = -90.0f;
     fitToView();
+}
+
+void MultiViewportPanel::resetToNegIsoView() {
+    // ISO(yaw=45, pitch=35.264)의 정확한 반대 방향 - 헤더 주석 참고(-XZ와 같은 이유로 pitch<0).
+    camera_.yawDeg = -135.0f;
+    camera_.pitchDeg = -35.264f;
+    fitToView();
+}
+
+void MultiViewportPanel::resetToTrimetricView() {
+    camera_.yawDeg = 30.0f;
+    camera_.pitchDeg = 20.0f;
+    fitToView();
+}
+
+// § F4 - 지금 보는 방향(worldDir, 헤더 주석의 공식)과 6개 직교 뷰 방향의 내적이 가장 큰 쪽으로 맞춘다.
+// 마우스로 계속 돌리면 pitch가 ±90을 넘어갈 수 있지만, 공식이 삼각함수라 그대로 맞는 방향이 나온다.
+// 독립 조작 모드에서는 마우스가 올라가 있는 뷰포트의 각도를 기준으로 판단한다(다른 프리셋처럼
+// 결과는 전체 공통 - fitToView가 각 뷰포트의 로컬 각도를 덮어쓴다).
+void MultiViewportPanel::snapToNearestView() {
+    const Camera& reference =
+        (independentMode_ && hoveredViewport_) ? hoveredViewport_->captureInfo().camera : camera_;
+    constexpr double kDegToRad = 0.017453292519943295;
+    const double yaw = reference.yawDeg * kDegToRad;
+    const double pitch = reference.pitchDeg * kDegToRad;
+    const QVector3D viewDir(static_cast<float>(std::cos(pitch) * std::sin(yaw)), static_cast<float>(-std::sin(pitch)),
+                            static_cast<float>(-std::cos(pitch) * std::cos(yaw)));
+    struct Candidate {
+        QVector3D dir;
+        void (MultiViewportPanel::*snap)();
+    };
+    const Candidate candidates[] = {
+        {{0, 0, -1}, &MultiViewportPanel::snapToXYView}, {{0, 0, 1}, &MultiViewportPanel::snapToNegXYView},
+        {{1, 0, 0}, &MultiViewportPanel::snapToYZView},  {{-1, 0, 0}, &MultiViewportPanel::snapToNegYZView},
+        {{0, -1, 0}, &MultiViewportPanel::snapToXZView}, {{0, 1, 0}, &MultiViewportPanel::snapToNegXZView},
+    };
+    const Candidate* best = &candidates[0];
+    for (const auto& candidate : candidates) {
+        if (QVector3D::dotProduct(candidate.dir, viewDir) > QVector3D::dotProduct(best->dir, viewDir)) {
+            best = &candidate;
+        }
+    }
+    (this->*(best->snap))();
 }
 
 // 단축키 F 및 최초 로드 시 공용 - 로드된 모든 인치의 bounding box 합집합 "중심"에 카메라를

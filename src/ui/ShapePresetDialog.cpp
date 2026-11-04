@@ -57,7 +57,10 @@ ShapePresetDialog::ShapePresetDialog(
     finishManualSelectButton_->setVisible(false);
     connect(finishManualSelectButton_, &QPushButton::clicked, this,
             &ShapePresetDialog::onFinishManualSelectClicked);
-    captureStatusLabel_ = new QLabel("아직 캡처된 형상이 없습니다.", this);
+    captureStatusLabel_ = new QLabel(
+        "아직 캡처된 형상이 없습니다. \"형상 클릭해서 등록\" 또는 \"면 직접 선택\"을 누르거나, 바로 Ctrl+드래그로 "
+        "면을 고르세요.",
+        this);
     captureStatusLabel_->setWordWrap(true);
 
     nameEdit_ = new QLineEdit(this);
@@ -169,7 +172,28 @@ void ShapePresetDialog::RebuildViewer() {
     connect(viewerPanel_, &viewer::MultiViewportPanel::facesInRegionPicked, this,
             &ShapePresetDialog::onFacesInRegionPicked);
     viewerHost_->layout()->addWidget(viewerPanel_);
+    ArmIdleSelection();
 }
+
+// § Ctrl+드래그 바로 선택(2026-11-04) - "마우스 드래그로도 선택할 수 있게(Ctrl+왼쪽), Shift+왼쪽은 해제"
+// 요청. 예전엔 "면 직접 선택..."을 먼저 눌러야만 드래그 선택이 됐다. 이제 다른 작업 중이 아니면 피킹 +
+// 사각형 선택을 켜 두어서, 언제든 Ctrl+드래그하면 바로 면 직접 선택으로 들어간다. 그냥 클릭은 무시하고
+// (onFacePicked가 대기 상태면 아무것도 안 함) 그냥 드래그는 예전처럼 화면 회전이다.
+void ShapePresetDialog::ArmIdleSelection() {
+    if (!viewerPanel_) {
+        return;
+    }
+    viewerPanel_->setRegionSelectModeActive(true);
+    viewerPanel_->setPickModeActive(true);
+}
+
+namespace {
+QString ManualSelectionGuide(size_t count) {
+    return QString("면 선택 중(%1개) - 클릭 또는 Ctrl+드래그 = 추가, Shift+클릭 또는 Shift+드래그 = 제거. "
+                   "그냥 드래그는 화면 회전입니다. 다 고르면 \"선택 완료\"를 누르세요.")
+        .arg(count);
+}
+} // namespace
 
 void ShapePresetDialog::ResetCaptureState() {
     pickArmed_ = false;
@@ -179,15 +203,16 @@ void ShapePresetDialog::ResetCaptureState() {
     hasCapturedPatch_ = false;
     capturedDescriptor_ = geometry::FeaturePatchDescriptor{};
     capturedHandle_ = geometry::kInvalidModelHandle;
-    captureStatusLabel_->setText("아직 캡처된 형상이 없습니다.");
+    captureStatusLabel_->setText(
+        "아직 캡처된 형상이 없습니다. \"형상 클릭해서 등록\" 또는 \"면 직접 선택\"을 누르거나, 바로 Ctrl+드래그로 "
+        "면을 고르세요.");
     findSameModelButton_->setEnabled(false);
     sameModelCountLabel_->clear();
     saveButton_->setEnabled(false);
     if (viewerPanel_) {
-        viewerPanel_->setPickModeActive(false);
-        viewerPanel_->setRegionSelectModeActive(false);
         viewerPanel_->SetCapturedPatchHighlight({});
     }
+    ArmIdleSelection();
 }
 
 void ShapePresetDialog::onCaptureClicked() {
@@ -198,8 +223,10 @@ void ShapePresetDialog::onCaptureClicked() {
     manualSelectedFaces_.clear();
     finishManualSelectButton_->setVisible(false);
     pickArmed_ = true;
-    captureStatusLabel_->setText("피킹 대기 중 - 뷰어에서 등록하려는 형상을 클릭하세요.");
-    viewerPanel_->setRegionSelectModeActive(false);
+    captureStatusLabel_->setText(
+        "피킹 대기 중 - 뷰어에서 등록하려는 형상을 클릭하세요(인접 면까지 자동으로 묶음). "
+        "면을 직접 고르려면 Ctrl+드래그하세요.");
+    viewerPanel_->setRegionSelectModeActive(true);
     viewerPanel_->setPickModeActive(true);
 }
 
@@ -212,9 +239,7 @@ void ShapePresetDialog::onManualSelectClicked() {
     manualSelectedFaces_.clear();
     viewerPanel_->SetCapturedPatchHighlight({});
     finishManualSelectButton_->setVisible(true);
-    captureStatusLabel_->setText(
-        "면 선택 중(0개) - 클릭=추가/Shift+클릭=제거, Ctrl+드래그=사각형 안 전체 추가(Ctrl+Shift+드래그=제거). "
-        "일반 드래그는 예전처럼 화면 회전입니다. 다 고르면 \"선택 완료\"를 누르세요.");
+    captureStatusLabel_->setText(ManualSelectionGuide(0));
     // § 드래그 영역 다중 선택 - 수동 선택 모드에서만 켠다. 일반 "지정..." 흐름
     // (onCaptureClicked, RuleEditorDialog 등)은 꺼둬서 "피킹 모드 중 드래그=회전"이라는
     // 기존 동작을 그대로 유지한다.
@@ -228,10 +253,6 @@ void ShapePresetDialog::onFinishManualSelectClicked() {
     }
     manualSelectMode_ = false;
     finishManualSelectButton_->setVisible(false);
-    if (viewerPanel_) {
-        viewerPanel_->setPickModeActive(false);
-        viewerPanel_->setRegionSelectModeActive(false);
-    }
     if (manualSelectedFaces_.empty()) {
         QMessageBox::information(this, "선택 없음", "면을 하나도 선택하지 않았습니다.");
         ResetCaptureState();
@@ -258,19 +279,14 @@ void ShapePresetDialog::onFacePicked(
         }
         ToggleManualFace(faceIndex, shiftHeld);
         UpdateManualSelectionHighlight();
-        captureStatusLabel_->setText(QString("면 선택 중(%1개) - 클릭=추가/Shift+클릭=제거, Ctrl+드래그=사각형 안 "
-                                              "전체 추가(Ctrl+Shift+드래그=제거). 다 고르면 \"선택 완료\"를 누르세요.")
-                                          .arg(manualSelectedFaces_.size()));
+        captureStatusLabel_->setText(ManualSelectionGuide(manualSelectedFaces_.size()));
         return;
     }
 
     if (!pickArmed_) {
-        return;
+        return; // 대기 상태(ArmIdleSelection)의 그냥 클릭은 무시 - Ctrl+드래그만 선택을 시작한다.
     }
     pickArmed_ = false;
-    if (viewerPanel_) {
-        viewerPanel_->setPickModeActive(false);
-    }
 
     const geometry::PickResult pick = adapter_->PickFace(handle, origin, dir);
     if (pick.kind == geometry::PickedFaceKind::None) {
@@ -289,17 +305,20 @@ void ShapePresetDialog::onFacePicked(
 
 void ShapePresetDialog::onFacesInRegionPicked(
     geometry::ModelHandle handle, std::vector<int> faceIndices, bool shiftHeld) {
-    if (!manualSelectMode_ || faceIndices.empty()) {
-        return;
-    }
     (void)handle; // 대상 인치는 뷰어가 하나뿐이라 이미 SelectedModelHandle()과 같음.
+    if (!manualSelectMode_) {
+        // § Ctrl+드래그 바로 선택 - 대기 중이거나 "형상 클릭해서 등록" 대기 중에 Ctrl+드래그하면 면 직접
+        // 선택으로 넘어간다. 아직 고른 게 없는데 Shift+드래그(해제)면 할 일이 없다.
+        if (shiftHeld || faceIndices.empty()) {
+            return;
+        }
+        onManualSelectClicked();
+    }
     for (int faceIndex : faceIndices) {
         ToggleManualFace(faceIndex, shiftHeld);
     }
     UpdateManualSelectionHighlight();
-    captureStatusLabel_->setText(QString("면 선택 중(%1개) - 클릭=추가/Shift+클릭=제거, Ctrl+드래그=사각형 안 전체 "
-                                          "추가(Ctrl+Shift+드래그=제거). 다 고르면 \"선택 완료\"를 누르세요.")
-                                      .arg(manualSelectedFaces_.size()));
+    captureStatusLabel_->setText(ManualSelectionGuide(manualSelectedFaces_.size()));
 }
 
 void ShapePresetDialog::ToggleManualFace(int faceIndex, bool shiftHeld) {
