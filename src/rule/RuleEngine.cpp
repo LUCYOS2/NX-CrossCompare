@@ -17,7 +17,7 @@ namespace rule {
 namespace {
 
 // anchor.paramKey=="diameter" 필터는 rule::FilterByDiameter(Selector.h)를 그대로 쓴다 -
-// 포인트 검색(AnchorSearchDialog)도 같은 필터를 써야 해서 공용 함수로 뺐다. 이름을
+// 규칙 관리창의 매칭 미리보기(RuleEditorDialog)도 같은 필터를 써야 해서 공용 함수로 뺐다. 이름을
 // 다르게 둔 이유: 같은 이름으로 이 anonymous namespace 안에 선언하면 인수 개수가
 // 다른 오버로드라도 바깥(rule::) 쪽 선언을 가려버려서(이름 은닉) 컴파일이 깨진다.
 std::vector<geometry::AnchorCandidate> ApplyDiameterFilter(

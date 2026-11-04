@@ -16,7 +16,7 @@ namespace rule {
 // anchor_type이 원통면(Hole/Boss_Center)이면 종류를 안 가리고 다 잡히는 문제(형상
 // 인식은 되지만 진짜 체결 구멍인지 필렛/모서리인지 구분 못 함)를 완화하는 필터.
 // paramKey=="diameter"이고 paramValue가 있을 때만 지름 ±kDiameterMatchToleranceMm
-// 범위 밖의 후보를 제거한다. RuleEngine과 포인트 검색(AnchorSearchDialog)이 공유한다.
+// 범위 밖의 후보를 제거한다. RuleEngine과 규칙 관리창의 매칭 미리보기(RuleEditorDialog)가 공유한다.
 constexpr double kDiameterMatchToleranceMm = 0.3;
 
 std::vector<geometry::AnchorCandidate> FilterByDiameter(
