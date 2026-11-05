@@ -53,6 +53,7 @@
 #include <gp_Vec.hxx>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <fstream>
 #include <limits>
@@ -155,28 +156,54 @@ gp_Pnt FaceCenterOnPlane(const BoundingBox& faceBox, const gp_Pln& plane) {
 
 // § 교차점 탐색 공용(2026-10-30) - PickFace(커서 근처)와 FindPointCandidates(측정 엔진)가
 // 같은 근사로 교차점을 구해야 클릭한 좌표와 엔진이 다시 찾은 좌표가 일치한다.
+constexpr int kIntersectionSampleCount = 24;
+constexpr double kIntersectionTouchToleranceMm = 0.5;
+
+// § 교차점 탐색 가속(2026-11-05) - 회사PC에서 규칙 관리 "지정" 클릭 뒤 응답 없음 리포트. 모서리가
+// 빽빽한 후크/리브 근처에서는 모든 모서리 쌍마다 곡선 어댑터를 새로 만들고 25×25번 곡선 값을 다시
+// 계산해서(Debug에서 특히) 수십 초가 걸릴 수 있었다. 이제 모서리마다 샘플 점을 한 번만 구해 두고,
+// 샘플 범위(+허용오차)가 겹치지 않는 쌍은 바로 건너뛴다. 범위가 안 겹치면 어느 샘플 쌍도 허용오차
+// 안에 들 수 없으므로 결과는 예전과 같다.
 struct NearbyEdge {
     TopoDS_Edge edge;
     double first = 0.0;
     double last = 0.0;
+    std::array<gp_Pnt, kIntersectionSampleCount + 1> samples;
+    gp_XYZ boxMin;
+    gp_XYZ boxMax;
 };
+
+NearbyEdge MakeNearbyEdge(const TopoDS_Edge& edge, double first, double last) {
+    NearbyEdge e;
+    e.edge = edge;
+    e.first = first;
+    e.last = last;
+    BRepAdaptor_Curve curve(edge);
+    const double big = std::numeric_limits<double>::max();
+    e.boxMin = gp_XYZ(big, big, big);
+    e.boxMax = gp_XYZ(-big, -big, -big);
+    for (int i = 0; i <= kIntersectionSampleCount; ++i) {
+        const gp_Pnt p = curve.Value(first + (last - first) * i / kIntersectionSampleCount);
+        e.samples[static_cast<size_t>(i)] = p;
+        e.boxMin.SetCoord(std::min(e.boxMin.X(), p.X()), std::min(e.boxMin.Y(), p.Y()), std::min(e.boxMin.Z(), p.Z()));
+        e.boxMax.SetCoord(std::max(e.boxMax.X(), p.X()), std::max(e.boxMax.Y(), p.Y()), std::max(e.boxMax.Z(), p.Z()));
+    }
+    return e;
+}
 
 // 두 모서리를 촘촘히 샘플링해서 서로 가장 가까워지는 지점을 찾는다. 그 최소 거리가 아주
 // 작으면(실제로 만나거나 맞닿음) 두 샘플의 중점을 교차점으로 삼는다 - 정확한 곡선-곡선 교차
 // 계산(무거움) 대신 쓰는 실용적 근사.
 bool ApproxEdgeIntersection(const NearbyEdge& a, const NearbyEdge& b, gp_Pnt& out) {
-    constexpr int kIntersectionSampleCount = 24;
-    constexpr double kIntersectionTouchToleranceMm = 0.5;
-    BRepAdaptor_Curve curveA(a.edge);
-    BRepAdaptor_Curve curveB(b.edge);
+    const double tol = kIntersectionTouchToleranceMm;
+    if (a.boxMin.X() > b.boxMax.X() + tol || b.boxMin.X() > a.boxMax.X() + tol || a.boxMin.Y() > b.boxMax.Y() + tol ||
+        b.boxMin.Y() > a.boxMax.Y() + tol || a.boxMin.Z() > b.boxMax.Z() + tol || b.boxMin.Z() > a.boxMax.Z() + tol) {
+        return false;
+    }
     double bestPairDist = std::numeric_limits<double>::max();
     gp_Pnt bestPairMid;
-    for (int ia = 0; ia <= kIntersectionSampleCount; ++ia) {
-        const double ta = a.first + (a.last - a.first) * ia / kIntersectionSampleCount;
-        const gp_Pnt pa = curveA.Value(ta);
-        for (int ib = 0; ib <= kIntersectionSampleCount; ++ib) {
-            const double tb = b.first + (b.last - b.first) * ib / kIntersectionSampleCount;
-            const gp_Pnt pb = curveB.Value(tb);
+    for (const gp_Pnt& pa : a.samples) {
+        for (const gp_Pnt& pb : b.samples) {
             const double d = pa.Distance(pb);
             if (d < bestPairDist) {
                 bestPairDist = d;
@@ -729,7 +756,7 @@ PickResult StepGeometryAdapter::PickFace(
             considerPoint(s.center, PointSubKind::Center, s.edge);
         }
         if (line.Distance(s.start) <= nearTol || line.Distance(s.end) <= nearTol || line.Distance(s.mid) <= nearTol) {
-            nearbyEdges.push_back({s.edge, s.first, s.last});
+            nearbyEdges.push_back(MakeNearbyEdge(s.edge, s.first, s.last));
         }
     }
 
@@ -873,7 +900,7 @@ std::vector<AnchorCandidate> StepGeometryAdapter::FindPointCandidates(
             // PickFace와 같은 기준 - 모서리의 시작/끝/중간점 중 하나라도 탐색 반경 안이면 후보.
             if (curve->Value(first).Distance(nearPnt) <= radiusMm || curve->Value(last).Distance(nearPnt) <= radiusMm ||
                 curve->Value((first + last) * 0.5).Distance(nearPnt) <= radiusMm) {
-                nearbyEdges.push_back({edge, first, last});
+                nearbyEdges.push_back(MakeNearbyEdge(edge, first, last));
             }
         }
     }

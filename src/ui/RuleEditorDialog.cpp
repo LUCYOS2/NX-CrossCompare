@@ -1374,7 +1374,11 @@ void RuleEditorDialog::onPickPointClicked() {
     // 눌러야 했다(2단계). 이제 "지정..."을 다시 누르면 기존 포인트를 비우고 바로 새로
     // 2개를 찍기 시작한다 - "다시 지정하고 싶으면 그냥 지정 버튼을 다시 누르면 된다"로
     // 단순화(수동 삭제는 "이 규칙에서 포인트를 아예 없애고 싶을 때"만 남겨둠).
-    if (!points_.empty()) {
+    // § 프리셋 + 클릭 조합(2026-11-05) - "프리셋으로 추가" 뒤에 "지정..."을 누르면 방금 추가한 프리셋
+    // 포인트까지 지워져서 프리셋 1개 + 클릭 1개 규칙을 만들 수 없었다. 이제 포인트가 2개 다 있을 때만
+    // 비우고 새로 2개를 찍는다. 1개만 있으면 그대로 두고 나머지 1개만 찍는다.
+    const bool keepExistingPoint = points_.size() == 1;
+    if (points_.size() >= 2) {
         points_.clear();
         currentOverallSizeOffsetAxis_.clear();
         dimensionOffsetManuallyAdjusted_ = false;
@@ -1388,8 +1392,10 @@ void RuleEditorDialog::onPickPointClicked() {
     autoChainSecondPoint_ = true;
     pickArmed_ = true;
     pickStatusLabel_->setText(
-        "피킹 대기 중 - 위 3D 뷰에서 클릭하세요. 모서리/꼭짓점 근처를 클릭하면 자동으로 그 점에 스냅되고(주황 점으로 "
-        "표시), 그 외엔 클릭한 면(구멍은 원통, 그 외엔 평면)으로 인식됩니다. 포인트를 2개 연달아 찍습니다.");
+        QString("피킹 대기 중 - 위 3D 뷰에서 클릭하세요. 모서리/꼭짓점 근처를 클릭하면 자동으로 그 점에 스냅되고(주황 점으로 "
+                "표시), 그 외엔 클릭한 면(구멍은 원통, 그 외엔 평면)으로 인식됩니다. %1")
+            .arg(keepExistingPoint ? "이미 있는 포인트 1개는 그대로 두고 나머지 1개를 찍습니다."
+                                   : "포인트를 2개 연달아 찍습니다."));
     pickStatusLabel_->show();
     editorViewerPanel_->setPickModeActive(true);
 }
