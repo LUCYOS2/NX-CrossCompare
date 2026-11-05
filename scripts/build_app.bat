@@ -23,9 +23,47 @@ if defined ENV_ERROR goto :failed
 call "%~dp0_build_env.bat" refresh
 if defined ENV_ERROR goto :failed
 
-rem CLEAN=1 (rebuild_app_clean.bat) deletes every compiled object first. Use it when
-rem the app crashes right after an update (e.g. "HEAP CORRUPTION DETECTED"): a build
-rem that failed half-way can leave objects compiled against old class layouts.
+rem A running app locks nx_crosscompare.exe and the link step fails (LNK1168, U1077).
+tasklist /FI "IMAGENAME eq nx_crosscompare.exe" 2>nul | find /I "nx_crosscompare.exe" >nul
+if not errorlevel 1 (
+    set "ENV_ERROR=The app nx_crosscompare.exe is still running - close it, then run this file again"
+    goto :failed
+)
+
+rem Automatic clean build when a header (.h) changed since the last successful build.
+rem If some objects are not recompiled after a class gains members (old object = old
+rem class size), the app writes past the end of the object and Debug shows "HEAP
+rem CORRUPTION DETECTED". The commit of the last good build is kept in the build folder.
+set "STAMP=%BUILD%\nxcc_last_build_commit.txt"
+set "HEAD_COMMIT="
+for /f %%C in ('git -C "%REPO%" rev-parse HEAD 2^>nul') do set "HEAD_COMMIT=%%C"
+if not defined HEAD_COMMIT goto :afterautoclean
+if "%CLEAN%"=="1" goto :afterautoclean
+set "LAST_COMMIT="
+if exist "%STAMP%" set /p LAST_COMMIT=<"%STAMP%"
+if not defined LAST_COMMIT (
+    set "CLEAN=1"
+    echo.
+    echo No record of the last build - doing one clean build to be safe.
+    goto :afterautoclean
+)
+if "%LAST_COMMIT%"=="%HEAD_COMMIT%" goto :afterautoclean
+set "HDR_LIST=%TEMP%\nxcc_changed_headers_%RANDOM%.txt"
+git -C "%REPO%" diff --name-only %LAST_COMMIT% %HEAD_COMMIT% -- "*.h" "*.hpp" > "%HDR_LIST%" 2>&1
+if errorlevel 1 (
+    set "CLEAN=1"
+) else (
+    for %%F in ("%HDR_LIST%") do if %%~zF GTR 0 set "CLEAN=1"
+)
+if "%CLEAN%"=="1" (
+    echo.
+    echo Header files changed since the last build - doing a clean build:
+    type "%HDR_LIST%"
+)
+del "%HDR_LIST%" >nul 2>nul
+:afterautoclean
+
+rem CLEAN=1 (set above, or by rebuild_app_clean.bat) deletes every compiled object first.
 if not "%CLEAN%"=="1" goto :build
 echo.
 echo Cleaning old build outputs ...
@@ -36,12 +74,6 @@ if errorlevel 1 (
 )
 
 :build
-rem A running app locks nx_crosscompare.exe and the link step fails (LNK1168, U1077).
-tasklist /FI "IMAGENAME eq nx_crosscompare.exe" 2>nul | find /I "nx_crosscompare.exe" >nul
-if not errorlevel 1 (
-    set "ENV_ERROR=The app nx_crosscompare.exe is still running - close it, then run this file again"
-    goto :failed
-)
 rem Step 1: the app alone. Step 2: everything else (tests, diagnostic tools).
 rem A failure in step 2 does not stop the app from being used.
 echo.
@@ -49,6 +81,9 @@ echo [1/2] Building the app (this can take several minutes the first time) ...
 set "BUILD_PART=app"
 "%CMAKE_EXE%" --build "%BUILD%" --config %CONFIG% --target nx_crosscompare
 if errorlevel 1 goto :buildfailed
+
+:appok
+if defined HEAD_COMMIT (echo %HEAD_COMMIT%) > "%STAMP%"
 
 :buildtools
 echo.
@@ -99,7 +134,7 @@ if not errorlevel 1 (
     rem The second try passed - the first failure was temporary (a file locked by
     rem antivirus/indexer, etc.). Carry on as a normal successful build.
     echo The second try succeeded - the first failure was temporary.
-    if "%BUILD_PART%"=="app" goto :buildtools
+    if "%BUILD_PART%"=="app" goto :appok
     goto :buildok
 )
 echo.
