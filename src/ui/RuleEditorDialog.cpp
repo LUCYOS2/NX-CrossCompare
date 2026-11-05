@@ -3,6 +3,7 @@
 #include "rule/BuiltInCatalog.h"
 #include "rule/RuleEngine.h"
 #include "rule/Selector.h"
+#include "ui/PresetDimensionDialog.h"
 #include "ui/ShapePresetDialog.h"
 #include "viewer/MultiViewportPanel.h"
 
@@ -146,6 +147,13 @@ RuleEditorDialog::RuleEditorDialog(
     // 같이 둘 이유가 없다는 사용자 판단(2026-09-18) - 옛 AnchorSearchDialog는 삭제.
     presetPointButton_ = new QPushButton("프리셋으로 추가...", this);
     connect(presetPointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onAddPresetPointClicked);
+    // § 프리셋 자동 치수(2026-11-05) - "후크 형상을 추가하면 잴 만한 포인트와 치수선을 자동으로 만들어
+    // 달라"는 요청. 규칙 하나씩 손으로 찍는 대신, 프리셋 하나로 치수 후보 여러 개를 한 번에 규칙으로 만든다.
+    autoPresetDimensionButton_ = new QPushButton("프리셋 자동 치수...", this);
+    autoPresetDimensionButton_->setToolTip(
+        "형상 프리셋을 고르면 그 형상의 크기(양 끝면 사이)와 제품 외곽에서의 위치 치수 후보를 보여주고,\n"
+        "체크한 항목을 규칙으로 한 번에 저장합니다.");
+    connect(autoPresetDimensionButton_, &QPushButton::clicked, this, &RuleEditorDialog::onAutoPresetDimensionClicked);
     deletePointButton_ = new QPushButton("선택 포인트 삭제", this);
     connect(deletePointButton_, &QPushButton::clicked, this, &RuleEditorDialog::onDeletePointClicked);
 
@@ -157,6 +165,7 @@ RuleEditorDialog::RuleEditorDialog(
     pointMeasureSection->addStretch(1);
     pointMeasureSection->addWidget(pickPointButton_);
     pointMeasureSection->addWidget(presetPointButton_);
+    pointMeasureSection->addWidget(autoPresetDimensionButton_);
     pointMeasureSection->addWidget(deletePointButton_);
 
     // ---- 우측: 3) 관리 항목 ----
@@ -1362,6 +1371,38 @@ void RuleEditorDialog::onAddPresetPointClicked() {
         FinalizePointRef(entry, handle);
     }
     AddPoint(entry);
+}
+
+void RuleEditorDialog::onAutoPresetDimensionClicked() {
+    const geometry::ModelHandle handle = targetModelCombo_->currentIndex() >= 0
+        ? static_cast<geometry::ModelHandle>(targetModelCombo_->currentData().toInt())
+        : geometry::kInvalidModelHandle;
+    if (handle == geometry::kInvalidModelHandle) {
+        QMessageBox::information(this, "자동 치수 불가", "먼저 STEP 파일을 불러오세요.");
+        return;
+    }
+    std::string presetName;
+    geometry::FeaturePatchDescriptor descriptor;
+    {
+        // 프리셋 창(자체 뷰어 포함)은 고른 뒤 바로 닫아서 다음 창과 뷰어가 겹쳐 떠 있지 않게 한다.
+        ShapePresetDialog presetDialog(db_, projectId_, adapter_, models_, this);
+        if (presetDialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        const auto preset = presetDialog.SelectedPreset();
+        if (!preset) {
+            return;
+        }
+        presetName = preset->name;
+        descriptor = presetDialog.SelectedDescriptor();
+    }
+    // 치수 후보는 이 창의 대표 인치 모델에서 찾는다(저장될 규칙의 기준 인치 = 지금 보고 있는 인치).
+    PresetDimensionDialog dimensionDialog(db_, projectId_, adapter_, models_, handle, presetName, descriptor, this);
+    dimensionDialog.exec();
+    if (dimensionDialog.SavedRuleCount() > 0) {
+        refreshTable();
+        emit rulesChanged();
+    }
 }
 
 void RuleEditorDialog::onPickPointClicked() {

@@ -15,6 +15,8 @@ add_library(rule STATIC
     RuleEngine.cpp
     BuiltInCatalog.h
     BuiltInCatalog.cpp
+    PresetDimensions.h
+    PresetDimensions.cpp
 )
 
 target_link_libraries(rule PUBLIC geometry)

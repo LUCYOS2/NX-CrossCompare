@@ -2,6 +2,7 @@
 #include "rule/BuiltInCatalog.h"
 #include "rule/Matching.h"
 #include "rule/Measure.h"
+#include "rule/PresetDimensions.h"
 #include "rule/RuleEngine.h"
 #include "rule/Selector.h"
 
@@ -586,6 +587,83 @@ void TestConsistencyWarningsMarkSuspectValues() {
     Check(sizeResults[1].warning.empty() && sizeResults[4].warning.empty(), "overall size needs no matching check");
 }
 
+// § 프리셋 자동 치수(2026-11-05) - 축 수직 평면 하나(faceBox는 그 평면 위의 범위).
+geometry::PlaneCandidate AxisFace(int axis, double sign, const geometry::Vec3& lo, const geometry::Vec3& hi) {
+    geometry::PlaneCandidate p;
+    p.planeType = "Datum_Plane";
+    p.normal = geometry::Vec3{axis == 0 ? sign : 0.0, axis == 1 ? sign : 0.0, axis == 2 ? sign : 0.0};
+    p.faceBox = geometry::BoundingBox{lo, hi};
+    p.hasFaceBox = true;
+    p.pointOnPlane = geometry::Vec3{(lo.x + hi.x) * 0.5, (lo.y + hi.y) * 0.5, (lo.z + hi.z) * 0.5};
+    return p;
+}
+
+// 왼쪽 외곽에서 10mm 안쪽에 선 10x10x10 후크(바닥은 판에 붙어 있어 -Z 끝면 없음) + 제품 외곽 6면 + 판 윗면.
+struct HookModel {
+    FakeAdapter::Model model;
+    geometry::PatchCandidate hook;
+};
+HookModel MakeHookModel(double w, double h) {
+    using geometry::Vec3;
+    HookModel m;
+    m.model.box = geometry::BoundingBox{Vec3{-w, -h, 0.0}, Vec3{w, h, 40.0}};
+    const double x0 = -w + 10.0;
+    const double x1 = -w + 20.0;
+    m.hook.hasBox = true;
+    m.hook.box = geometry::BoundingBox{Vec3{x0, -5.0, 5.0}, Vec3{x1, 5.0, 15.0}};
+    m.hook.planes = {AxisFace(0, -1.0, Vec3{x0, -5, 5}, Vec3{x0, 5, 15}), AxisFace(0, 1.0, Vec3{x1, -5, 5}, Vec3{x1, 5, 15}),
+                     AxisFace(1, -1.0, Vec3{x0, -5, 5}, Vec3{x1, -5, 15}), AxisFace(1, 1.0, Vec3{x0, 5, 5}, Vec3{x1, 5, 15}),
+                     AxisFace(2, 1.0, Vec3{x0, -5, 15}, Vec3{x1, 5, 15})};
+    m.model.planes = m.hook.planes;
+    const std::vector<geometry::PlaneCandidate> outline = {
+        AxisFace(0, -1.0, Vec3{-w, -h, 0}, Vec3{-w, h, 40}), AxisFace(0, 1.0, Vec3{w, -h, 0}, Vec3{w, h, 40}),
+        AxisFace(1, -1.0, Vec3{-w, -h, 0}, Vec3{w, -h, 40}), AxisFace(1, 1.0, Vec3{-w, h, 0}, Vec3{w, h, 40}),
+        AxisFace(2, -1.0, Vec3{-w, -h, 0}, Vec3{w, h, 0}),   AxisFace(2, 1.0, Vec3{-w, -h, 40}, Vec3{w, h, 40}),
+        AxisFace(2, 1.0, Vec3{-w, -h, 5}, Vec3{w, h, 5})};
+    m.model.planes.insert(m.model.planes.end(), outline.begin(), outline.end());
+    return m;
+}
+
+void TestPresetDimensionCandidatesAndRulesAcrossInches() {
+    const HookModel m55 = MakeHookModel(600.0, 350.0);
+    const HookModel m65 = MakeHookModel(700.0, 400.0);
+    const auto candidates = rule::ComputePresetDimensionCandidates(m55.hook, m55.model.box, m55.model.planes);
+    // -Z 끝면이 없어(판에 붙음) 크기 Z는 없고, 위치 Z는 가까운 -Z 외곽 대신 +Z 외곽(윗면 -> 후크 윗면)에서 잰다.
+    Check(candidates.size() == 5, "hook should give size X/Y and position X/Y/Z");
+    if (candidates.size() != 5) {
+        return;
+    }
+    Check(candidates[0].kind == rule::PresetDimensionKind::ShapeSize && candidates[0].axis == 0 &&
+              std::abs(candidates[0].valueMm - 10.0) < 1e-9,
+          "size X between the hook's two X end faces");
+    Check(candidates[1].kind == rule::PresetDimensionKind::ShapeSize && candidates[1].axis == 1,
+          "size Y between the hook's two Y end faces");
+    Check(candidates[2].kind == rule::PresetDimensionKind::FromOutline && candidates[2].axis == 0 &&
+              !candidates[2].outlineAtMax && std::abs(candidates[2].valueMm - 10.0) < 1e-9,
+          "position X from the nearer (-X) outline face");
+    Check(candidates[3].kind == rule::PresetDimensionKind::FromOutline && candidates[3].axis == 1 &&
+              std::abs(candidates[3].valueMm - 345.0) < 1e-9,
+          "position Y from the -Y outline face");
+    Check(candidates[4].kind == rule::PresetDimensionKind::FromOutline && candidates[4].axis == 2 &&
+              candidates[4].outlineAtMax && std::abs(candidates[4].valueMm - 25.0) < 1e-9,
+          "position Z falls back to the +Z outline face when the near side has no shape end face");
+
+    FakeAdapter adapter;
+    const auto h55 = adapter.Add(m55.model);
+    const auto h65 = adapter.Add(m65.model);
+    const double expected65[5] = {10.0, 10.0, 10.0, 395.0, 25.0};
+    for (size_t i = 0; i < candidates.size(); ++i) {
+        rule::Rule r = rule::MakePresetDimensionRule(candidates[i], "hook", adapter.GetBoundingBox(h55));
+        rule::RuleEngine::FinalizePlaneRef(adapter, h55, *r.anchors[0].ref);
+        rule::RuleEngine::FinalizePlaneRef(adapter, h55, *r.anchors[1].ref);
+        const auto results = rule::RuleEngine::Evaluate(adapter, {{55, h55}, {65, h65}}, r);
+        Check(results[0].ok && std::abs(results[0].value - candidates[i].valueMm) < 1e-9,
+              "the saved rule should measure the previewed value on the source inch");
+        Check(results[1].ok && std::abs(results[1].value - expected65[i]) < 1e-9,
+              "the saved rule should follow the hook on the larger inch");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -616,6 +694,7 @@ int main() {
         {"TestLocalReferencePlaneFollowsMatchedPoint", TestLocalReferencePlaneFollowsMatchedPoint},
         {"TestTrendOutlierNeedsFourPointsAndPicksWorst", TestTrendOutlierNeedsFourPointsAndPicksWorst},
         {"TestConsistencyWarningsMarkSuspectValues", TestConsistencyWarningsMarkSuspectValues},
+        {"TestPresetDimensionCandidatesAndRulesAcrossInches", TestPresetDimensionCandidatesAndRulesAcrossInches},
     };
     for (const auto& test : tests) {
         try {

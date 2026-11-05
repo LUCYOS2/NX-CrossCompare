@@ -162,6 +162,12 @@ struct FeaturePatchCapture {
 struct PatchCandidate {
     Vec3 position;
     double similarity = 0.0;
+    // § 프리셋 자동 치수(2026-11-05) - 패치를 이루는 면 전체의 범위와, 그중 평면들(바깥쪽 법선 + 면 범위,
+    // FindPlaneCandidates와 같은 형식). 형상의 양 끝면/외곽에서의 거리 같은 치수 후보를 만드는 데 쓴다.
+    // 실 형상이 없는 어댑터는 비워 둔다(hasBox=false).
+    bool hasBox = false;
+    BoundingBox box;
+    std::vector<PlaneCandidate> planes;
 };
 
 using ModelHandle = int;

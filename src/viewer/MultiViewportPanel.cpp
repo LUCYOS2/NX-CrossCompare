@@ -724,8 +724,10 @@ void MultiViewportPanel::fitToView() {
     if (handles_.empty()) {
         return;
     }
+    fitToBox(unionBoxOfHandles());
+}
 
-    const geometry::BoundingBox unionBox = unionBoxOfHandles();
+void MultiViewportPanel::fitToBox(const geometry::BoundingBox& unionBox) {
     const QVector3D center(static_cast<float>((unionBox.min.x + unionBox.max.x) * 0.5),
                             static_cast<float>((unionBox.min.y + unionBox.max.y) * 0.5),
                             static_cast<float>((unionBox.min.z + unionBox.max.z) * 0.5));

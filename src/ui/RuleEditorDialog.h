@@ -120,6 +120,9 @@ private slots:
     // "검색으로 추가..."(AnchorSearchDialog, Hole/Boss_Center 텍스트 검색)를 완전히
     // 대체한다 - 상위 호환이라 둘을 같이 둘 필요가 없다는 사용자 판단(2026-09-18).
     void onAddPresetPointClicked();
+    // § 프리셋 자동 치수(2026-11-05) - 프리셋을 고르면 그 형상의 크기/외곽에서의 위치 치수 후보를
+    // PresetDimensionDialog로 보여주고, 체크한 것만 규칙으로 한 번에 저장한다.
+    void onAutoPresetDimensionClicked();
     void onPickPointClicked();
     void onDeletePointClicked();
     void onFacePicked(geometry::ModelHandle handle, QVector3D rayOrigin, QVector3D rayDir, bool shiftHeld);
@@ -345,6 +348,7 @@ private:
     QComboBox* nextPointDirection_;
     QPushButton* pickPointButton_;
     QPushButton* presetPointButton_;
+    QPushButton* autoPresetDimensionButton_ = nullptr;
     QPushButton* deletePointButton_;
     QLabel* pickStatusLabel_;
 

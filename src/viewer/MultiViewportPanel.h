@@ -141,6 +141,10 @@ public:
     // ModelViewport::SetDimensionOffsetAxis 참고 - 모든 뷰포트에 같은 오프셋 축을 건다.
     void SetDimensionOffsetAxis(const QVector3D& axisDirWorld);
 
+    // § 프리셋 자동 치수(2026-11-05) - 지금 보는 각도 그대로 box가 화면에 꽉 차게 이동/확대한다(F와 같은
+    // 계산을 모델 전체 대신 이 범위로). 후크처럼 제품 대비 작은 형상을 바로 보여주는 데 쓴다.
+    void fitToBox(const geometry::BoundingBox& box);
+
     // § 카메라 회전 시 치수선 축 자동 재선택(2026-09-13) - RuleEditorDialog가 현재 카메라
     // 각도를 알아야 "화면에 더 잘 보이는 축"을 다시 고를 수 있다. 읽기 전용으로만 노출.
     const Camera& sharedCamera() const { return camera_; }

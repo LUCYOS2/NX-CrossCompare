@@ -7,6 +7,8 @@ add_library(ui STATIC
     ImportInchDialog.cpp
     ShapePresetDialog.h
     ShapePresetDialog.cpp
+    PresetDimensionDialog.h
+    PresetDimensionDialog.cpp
     MatchingDiagnosticsDialog.h
     MatchingDiagnosticsDialog.cpp
     ViewerDiagnosticsDialog.h

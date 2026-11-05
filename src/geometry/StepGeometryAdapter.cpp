@@ -154,6 +154,20 @@ gp_Pnt FaceCenterOnPlane(const BoundingBox& faceBox, const gp_Pln& plane) {
     return boxCenter.Translated(normal * -offset);
 }
 
+// 평면이면 FindPlaneCandidates 형식(면 범위, 면 근처 대표점, 바깥쪽 법선)으로 채운다. 평면이 아니면 false.
+bool MakePlaneCandidate(const TopoDS_Face& face, PlaneCandidate& out) {
+    BRepAdaptor_Surface surface(face, /*restrictTriangulation=*/false);
+    if (surface.GetType() != GeomAbs_Plane) {
+        return false;
+    }
+    const gp_Pln plane = surface.Plane();
+    out.faceBox = FaceBoundingBox(face);
+    out.hasFaceBox = true;
+    out.pointOnPlane = ToVec3(FaceCenterOnPlane(out.faceBox, plane));
+    out.normal = ToVec3(OrientedPlaneNormal(face, plane));
+    return true;
+}
+
 // § 교차점 탐색 공용(2026-10-30) - PickFace(커서 근처)와 FindPointCandidates(측정 엔진)가
 // 같은 근사로 교차점을 구해야 클릭한 좌표와 엔진이 다시 찾은 좌표가 일치한다.
 constexpr int kIntersectionSampleCount = 24;
@@ -446,6 +460,21 @@ struct StepGeometryAdapter::Impl {
             return faceBoxes;
         }
 
+        mutable std::vector<PlaneCandidate> planeCandidates;
+        mutable bool planeCandidatesBuilt = false;
+        const std::vector<PlaneCandidate>& PlaneCandidates() const {
+            if (!planeCandidatesBuilt) {
+                planeCandidatesBuilt = true;
+                for (TopExp_Explorer faceExp(shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
+                    PlaneCandidate candidate;
+                    if (MakePlaneCandidate(TopoDS::Face(faceExp.Current()), candidate)) {
+                        planeCandidates.push_back(std::move(candidate));
+                    }
+                }
+            }
+            return planeCandidates;
+        }
+
         const TopTools_IndexedDataMapOfShapeListOfShape& EdgeFaceMap() const {
             if (!edgeFaceMap) {
                 edgeFaceMap = std::make_unique<TopTools_IndexedDataMapOfShapeListOfShape>();
@@ -679,23 +708,12 @@ std::vector<PlaneCandidate> StepGeometryAdapter::FindPlaneCandidates(
     if (!model) {
         return {};
     }
-
-    std::vector<PlaneCandidate> candidates;
-    for (TopExp_Explorer faceExp(model->shape, TopAbs_FACE); faceExp.More(); faceExp.Next()) {
-        const TopoDS_Face& face = TopoDS::Face(faceExp.Current());
-        BRepAdaptor_Surface surface(face, /*restrictTriangulation=*/false);
-        if (surface.GetType() != GeomAbs_Plane) {
-            continue;
-        }
-        const gp_Pln plane = surface.Plane();
-        PlaneCandidate candidate;
+    // § 평면 목록 캐시(2026-11-05) - 매칭/지문 확정마다 모든 면의 곡면 종류와 범위를 다시 읽었다.
+    // 모델이 안 바뀌는 한 같은 값이라 처음 한 번만 만들고, 이름 칸만 요청대로 채워서 돌려준다.
+    std::vector<PlaneCandidate> candidates = model->PlaneCandidates();
+    for (auto& candidate : candidates) {
         candidate.planeType = planeType;
         candidate.partName = partName;
-        candidate.faceBox = FaceBoundingBox(face);
-        candidate.hasFaceBox = true;
-        candidate.pointOnPlane = ToVec3(FaceCenterOnPlane(candidate.faceBox, plane));
-        candidate.normal = ToVec3(OrientedPlaneNormal(face, plane));
-        candidates.push_back(std::move(candidate));
     }
     return candidates;
 }
@@ -1012,7 +1030,26 @@ std::vector<PatchCandidate> StepGeometryAdapter::FindPatchCandidates(
     std::vector<PatchCandidate> result;
     result.reserve(rawCandidates.size());
     for (const auto& candidate : rawCandidates) {
-        result.push_back(PatchCandidate{candidate.position, candidate.similarity});
+        PatchCandidate out{candidate.position, candidate.similarity};
+        // § 프리셋 자동 치수 - 패치 범위와 평면들(형상 끝면 후보).
+        for (const auto& face : candidate.faces) {
+            const BoundingBox faceBox = FaceBoundingBox(face);
+            if (!out.hasBox) {
+                out.box = faceBox;
+                out.hasBox = true;
+            } else {
+                out.box.min = Vec3{std::min(out.box.min.x, faceBox.min.x), std::min(out.box.min.y, faceBox.min.y),
+                                   std::min(out.box.min.z, faceBox.min.z)};
+                out.box.max = Vec3{std::max(out.box.max.x, faceBox.max.x), std::max(out.box.max.y, faceBox.max.y),
+                                   std::max(out.box.max.z, faceBox.max.z)};
+            }
+            PlaneCandidate plane;
+            if (MakePlaneCandidate(face, plane)) {
+                plane.planeType = "Datum_Plane";
+                out.planes.push_back(std::move(plane));
+            }
+        }
+        result.push_back(std::move(out));
     }
     return result;
 }
