@@ -42,18 +42,34 @@ if not errorlevel 1 (
     set "ENV_ERROR=The app nx_crosscompare.exe is still running - close it, then run this file again"
     goto :failed
 )
+rem Step 1: the app alone. Step 2: everything else (tests, diagnostic tools).
+rem A failure in step 2 does not stop the app from being used.
 echo.
-echo Building (this can take several minutes the first time) ...
+echo [1/2] Building the app (this can take several minutes the first time) ...
+set "BUILD_PART=app"
+"%CMAKE_EXE%" --build "%BUILD%" --config %CONFIG% --target nx_crosscompare
+if errorlevel 1 goto :buildfailed
+
+:buildtools
+echo.
+echo [2/2] Building tests and diagnostic tools ...
+set "BUILD_PART=tools"
 "%CMAKE_EXE%" --build "%BUILD%" --config %CONFIG%
 if errorlevel 1 goto :buildfailed
 
+:buildok
 call "%~dp0_build_env.bat" dllpath
 if not defined APP_EXE (
     set "ENV_ERROR=nx_crosscompare.exe not found under the build folder"
     goto :failed
 )
 echo.
-echo Build OK: %APP_EXE%
+if defined TOOLS_FAILED (
+    echo App build OK: %APP_EXE%
+    echo [WARNING] A test/diagnostic tool did not build - send the lines above. The app itself is fine.
+) else (
+    echo Build OK: %APP_EXE%
+)
 
 rem RUN_APP=1 / RUN_APP=0 skips the question.
 if "%RUN_APP%"=="1" goto :run
@@ -75,13 +91,34 @@ rem just the error lines.
 set "BUILD_LOG=%REPO%\scripts\diag_logs\build_log.txt"
 if not exist "%REPO%\scripts\diag_logs" mkdir "%REPO%\scripts\diag_logs"
 echo.
-echo Build failed. Collecting the error lines ...
-"%CMAKE_EXE%" --build "%BUILD%" --config %CONFIG% > "%BUILD_LOG%" 2>&1
+echo Build failed (%BUILD_PART%). Collecting the error lines ...
+set "TARGET_ARG="
+if "%BUILD_PART%"=="app" set "TARGET_ARG=--target nx_crosscompare"
+"%CMAKE_EXE%" --build "%BUILD%" --config %CONFIG% %TARGET_ARG% > "%BUILD_LOG%" 2>&1
+if not errorlevel 1 (
+    rem The second try passed - the first failure was temporary (a file locked by
+    rem antivirus/indexer, etc.). Carry on as a normal successful build.
+    echo The second try succeeded - the first failure was temporary.
+    if "%BUILD_PART%"=="app" goto :buildtools
+    goto :buildok
+)
 echo.
 echo ---------------- error lines ----------------
-findstr /i /c:"error C" /c:"error LNK" /c:"fatal error" /c:"CMake Error" "%BUILD_LOG%"
+findstr /i /c:"error" /c:"cannot open" /c:"failed" "%BUILD_LOG%"
 echo ----------------------------------------------
+rem Also show the end of the log - the failing step is always printed last, even
+rem when its message does not contain the word "error".
+for /f %%N in ('find /c /v "" ^< "%BUILD_LOG%"') do set "LOG_LINES=%%N"
+set /a LOG_SKIP=LOG_LINES-25
+if %LOG_SKIP% LSS 0 set "LOG_SKIP=0"
+echo ---------------- last lines of the log ----------------
+more +%LOG_SKIP% "%BUILD_LOG%"
+echo -------------------------------------------------------
 echo Full log: %BUILD_LOG%
+if "%BUILD_PART%"=="tools" (
+    set "TOOLS_FAILED=1"
+    goto :buildok
+)
 set "ENV_ERROR=Build failed - send the error lines above (file name, error code, message)"
 goto :failed
 
