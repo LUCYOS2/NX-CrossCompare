@@ -216,6 +216,9 @@ private:
     QTimer* hoverPickTimer_ = nullptr;
     // § 피킹 없는 사각형 선택 - 피킹 모드가 꺼진 채 regionSelect만 켜져 있을 때 Ctrl/Shift+왼쪽으로 시작한 드래그.
     bool regionOnlyDrag_ = false;
+    // § 앱 진단 기록(2026-11-05) - paintGL 한 번이 오래 걸리면(느린 그래픽/큰 도면) 진단 로그에 남긴다.
+    void noteFrameTime(qint64 ms);
+    qint64 lastSlowFrameLogMs_ = 0;
 
     geometry::IGeometryAdapter* adapter_;
     geometry::ModelHandle handle_;
@@ -281,6 +284,7 @@ private:
     // 이 데이터를 hoverFaceVbo_/hoverEdgeVbo_로 업로드한다(hoverPickPoint_와 같은 패턴).
     std::vector<QVector3D> hoverFaceTriangles_;
     std::vector<QVector3D> hoverEdgeSegments_;
+    bool hoverBuffersDirty_ = false; // 위 두 벡터가 바뀌어 GPU로 다시 올려야 하면 true
 
     // § 형상 프리셋 캡처 하이라이트 - hoverFaceVao_/Vbo_와 같은 셰이더 패스(isHoverFacePass)를
     // 재사용하되, 마우스 이동과 무관하게 항상(고정) 그려진다는 점만 다르다.

@@ -18,6 +18,7 @@ class QDoubleSpinBox;
 class QLabel;
 class QPushButton;
 class QSlider;
+class QTimer;
 
 namespace viewer {
 
@@ -144,6 +145,26 @@ public:
     // 각도를 알아야 "화면에 더 잘 보이는 축"을 다시 고를 수 있다. 읽기 전용으로만 노출.
     const Camera& sharedCamera() const { return camera_; }
 
+    // § 단축키 보강(2026-11-05) - QShortcut과 보조 처리(앱 전체 키 필터, cpp의 ViewerKeyFallbackFilter)가 같은
+    // 동작 함수를 부른다. KeyBindings()가 키 목록의 유일한 출처다.
+    enum class KeyAction {
+        Fit, Iso, ModePan, ModeZoom, ModeRotate, SnapNearest, ToggleSection, AxisX, AxisY, AxisZ,
+        NudgePlus, NudgeMinus, NudgePlusBig, NudgeMinusBig,
+    };
+    struct KeyBinding {
+        int qtKey;            // Qt::Key_*
+        quint32 nativeKey;    // Windows 가상 키 코드(VK_*) - Qt 키 코드가 안 맞을 때 보조 처리가 맞춰 본다
+        QString text;         // 입력된 글자(소문자) - 원격 접속 프로그램이 글자로만 보낼 때
+        QString altText;      // 같은 자리의 한글 자모(두벌식) - 한글 입력 상태일 때
+        KeyAction action;
+        QString keyName;      // 화면/진단에 보일 키 이름
+    };
+    static const std::vector<KeyBinding>& KeyBindings();
+    // 이 톱레벨 창 안에 떠 있는 패널(없으면 nullptr) - 보조 처리가 키를 어느 패널에 줄지 정한다.
+    static MultiViewportPanel* PanelForWindow(const QWidget* window);
+    // via: "단축키" / "단축키(중복)" / "보조 처리" - 진단 창에 어느 경로로 실행됐는지 보여준다.
+    void runKeyAction(KeyAction action, const QString& keyName, const QString& via);
+
 signals:
     // 어느 뷰포트에서 찍었든 여기로 모여서 나간다 - RuleEditorDialog는 패널 하나에만
     // 연결하면 되고, 개별 ModelViewport를 알 필요가 없다.
@@ -181,6 +202,9 @@ private:
     // 위젯이든 뷰포트든 이 패널 안 어디에 포커스가 있어도 먹는다(사용자 리포트: 포커스
     // 기반 keyPressEvent 방식일 때 F/H/I가 전혀 안 먹었던 문제의 근본 수정).
     void setupShortcuts();
+    static void EnsureKeyFallbackFilter();
+    QString lastKeyFeedback_;            // "F3 → 왼쪽 드래그 = 회전" - 안내 줄에 잠깐 보여준다
+    QTimer* keyFeedbackTimer_ = nullptr;
 
     geometry::IGeometryAdapter* adapter_ = nullptr;
     std::vector<geometry::ModelHandle> handles_;

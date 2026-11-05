@@ -1,5 +1,7 @@
 add_library(viewer STATIC
     Camera.h
+    DiagnosticsLog.h
+    DiagnosticsLog.cpp
     ModelViewport.h
     ModelViewport.cpp
     MultiViewportPanel.h

@@ -9,6 +9,8 @@ add_library(ui STATIC
     ShapePresetDialog.cpp
     MatchingDiagnosticsDialog.h
     MatchingDiagnosticsDialog.cpp
+    ViewerDiagnosticsDialog.h
+    ViewerDiagnosticsDialog.cpp
 )
 
 target_link_libraries(ui PUBLIC Qt6::Widgets viewer rule export_lib database)

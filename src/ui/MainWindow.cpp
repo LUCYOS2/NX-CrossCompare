@@ -41,6 +41,7 @@
 #include "ui/MatchingDiagnosticsDialog.h"
 #include "ui/RuleEditorDialog.h"
 #include "ui/ShapePresetDialog.h"
+#include "ui/ViewerDiagnosticsDialog.h"
 #include "viewer/MultiViewportPanel.h"
 
 namespace ui {
@@ -166,6 +167,12 @@ void MainWindow::setupMenuBar() {
     auto* verifyMenu = bar->addMenu("검증");
     auto* diagnosticsAction = verifyMenu->addAction("매칭 진단...");
     connect(diagnosticsAction, &QAction::triggered, this, &MainWindow::onMatchingDiagnosticsClicked);
+    // § 뷰어·키 입력 점검(2026-11-05) - 단축키가 안 먹거나 3D 화면이 멈출 때 실행 환경과 받은 키를 보여준다.
+    auto* viewerDiagnosticsAction = verifyMenu->addAction("뷰어·키 입력 점검...");
+    connect(viewerDiagnosticsAction, &QAction::triggered, this, [this]() {
+        auto* dialog = new ViewerDiagnosticsDialog(this); // 비모달, 닫으면 스스로 지워진다(WA_DeleteOnClose)
+        dialog->show();
+    });
 }
 
 void MainWindow::onMatchingDiagnosticsClicked() {

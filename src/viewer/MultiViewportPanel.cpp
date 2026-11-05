@@ -2,21 +2,30 @@
 #include "viewer/ModelViewport.h"
 
 #include "geometry/AlignmentCheck.h"
+#include "viewer/DiagnosticsLog.h"
 
+#include <QAbstractSpinBox>
+#include <QApplication>
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDebug>
 #include <QDoubleSpinBox>
 #include <QFont>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QKeyEvent>
 #include <QKeySequence>
+#include <QLineEdit>
 #include <QMatrix4x4>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QShortcut>
 #include <QSlider>
 #include <QString>
+#include <QTextEdit>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QVector3D>
 
@@ -138,6 +147,7 @@ MultiViewportPanel::MultiViewportPanel(geometry::IGeometryAdapter* adapter,
     syncSectionControlsFromCamera();
     setupShortcuts();
     s_livePanels.push_back(this);
+    connect(diag::Hub::instance(), &diag::Hub::glInfoReady, this, &MultiViewportPanel::refreshMouseDragModeLabel);
 }
 
 MultiViewportPanel::~MultiViewportPanel() {
@@ -159,7 +169,7 @@ void MultiViewportPanel::setupShortcuts() {
     // "중앙 위젯 + 그 형제인 dock들"까지만 넓힌다 - 비교 테이블은 커버하고, 별도
     // 톱레벨 윈도우인 모달 다이얼로그는 여전히 범위 밖이라 텍스트 입력을 방해하지 않는다.
     QWidget* shortcutScope = parentWidget() ? parentWidget() : static_cast<QWidget*>(this);
-    auto addShortcut = [this, shortcutScope](QKeySequence keySequence, auto slot) {
+    auto addShortcut = [this, shortcutScope](QKeySequence keySequence, KeyAction action, const QString& keyName) {
         // MainWindow::setupCentralViewer()가 STEP 재로드마다 새 MultiViewportPanel을 만들고
         // 그때마다 setupShortcuts()도 다시 호출된다. shortcutScope(MainWindow)는 패널과 달리
         // 재로드해도 안 죽는 위젯이라, 예전 패널이 걸어둔 같은 키의 QShortcut을 안 지우고
@@ -183,49 +193,183 @@ void MultiViewportPanel::setupShortcuts() {
         // 톱레벨 창이라 그게 활성 창일 땐 여전히 안 먹으므로(텍스트 입력 방해 없음) 위
         // 주석의 원래 목적은 그대로 유지된다.
         shortcut->setContext(Qt::WindowShortcut);
-        connect(shortcut, &QShortcut::activated, this, slot);
+        connect(shortcut, &QShortcut::activated, this,
+                [this, action, keyName]() { runKeyAction(action, keyName, "단축키"); });
+        // § 단축키 보강(2026-11-05) - 같은 키가 어쩌다 두 번 걸려 Qt가 "애매함"으로 판정해도 버리지 않고 실행한다
+        // (예전엔 이 경우 activated가 아예 안 터져 키가 통째로 먹통이었다).
+        connect(shortcut, &QShortcut::activatedAmbiguously, this,
+                [this, action, keyName]() { runKeyAction(action, keyName, "단축키(중복)"); });
         return shortcut;
     };
 
-    addShortcut(QKeySequence(Qt::Key_F), [this]() { fitToView(); });
-    addShortcut(QKeySequence(Qt::Key_I), [this]() { resetToIsoView(); });
-    // § F1/F2/F3/F4(2026-11-04) - 왼쪽 드래그 조작 모드 전환 + 가장 가까운 직교 뷰로 정렬.
-    addShortcut(QKeySequence(Qt::Key_F1), [this]() { setMouseDragMode(MouseDragMode::Pan); });
-    addShortcut(QKeySequence(Qt::Key_F2), [this]() { setMouseDragMode(MouseDragMode::Zoom); });
-    addShortcut(QKeySequence(Qt::Key_F3), [this]() { setMouseDragMode(MouseDragMode::Rotate); });
-    addShortcut(QKeySequence(Qt::Key_F4), [this]() { snapToNearestView(); });
-    addShortcut(QKeySequence(Qt::Key_H), [this]() {
-        if (hoveredViewport_) {
-            hoveredViewport_->toggleSection();
+    for (const KeyBinding& binding : KeyBindings()) {
+        addShortcut(QKeySequence(binding.qtKey), binding.action, binding.keyName);
+    }
+    EnsureKeyFallbackFilter();
+}
+
+// § 단축키 보강(2026-11-05) - "단축키가 하나도 안 먹는다"(회사PC) 리포트. 개발PC에서는 실제 키 입력을 흉내 낸
+// 점검(diag_viewer_input)에서 메인 화면/형상 프리셋 창 모두 정상이라, QShortcut이 키를 못 알아보는 환경(원격
+// 접속 프로그램이 글자를 문자 코드로만 보내거나, 한글 입력 상태 등)을 대비해 같은 동작을 QShortcut과 보조 처리
+// (EnsureKeyFallbackFilter) 둘 다에서 부른다. 실행되면 안내 줄에 "방금 누른 키"를 잠깐 띄워 키가 먹었는지 보이게 한다.
+const std::vector<MultiViewportPanel::KeyBinding>& MultiViewportPanel::KeyBindings() {
+    // nativeKey = Windows 가상 키 코드, altText = 같은 자리의 한글 자모(두벌식) - 둘 다 보조 처리에서만 쓴다.
+    static const std::vector<KeyBinding> bindings = {
+        {Qt::Key_F, 0x46, "f", QString::fromUtf8("ㄹ"), KeyAction::Fit, "F"},
+        {Qt::Key_I, 0x49, "i", QString::fromUtf8("ㅑ"), KeyAction::Iso, "I"},
+        // § F1/F2/F3/F4(2026-11-04) - 왼쪽 드래그 조작 모드 전환 + 가장 가까운 직교 뷰로 정렬.
+        {Qt::Key_F1, 0x70, "", "", KeyAction::ModePan, "F1"},
+        {Qt::Key_F2, 0x71, "", "", KeyAction::ModeZoom, "F2"},
+        {Qt::Key_F3, 0x72, "", "", KeyAction::ModeRotate, "F3"},
+        {Qt::Key_F4, 0x73, "", "", KeyAction::SnapNearest, "F4"},
+        {Qt::Key_H, 0x48, "h", QString::fromUtf8("ㅗ"), KeyAction::ToggleSection, "H"},
+        {Qt::Key_X, 0x58, "x", QString::fromUtf8("ㅌ"), KeyAction::AxisX, "X"},
+        {Qt::Key_Y, 0x59, "y", QString::fromUtf8("ㅛ"), KeyAction::AxisY, "Y"},
+        {Qt::Key_Z, 0x5A, "z", QString::fromUtf8("ㅋ"), KeyAction::AxisZ, "Z"},
+        // "+"/"-"는 물리 키 하나에 Shift로 두 문자를 겸하는 배열이 많아 Plus/Equal을 같이 등록.
+        // 큰 폭 이동은 +/- 대신 Page Up/Down으로 분리해서 Shift+= 입력과 안 헷갈리게 했다.
+        {Qt::Key_Plus, 0x6B, "+", "", KeyAction::NudgePlus, "+"},
+        {Qt::Key_Equal, 0xBB, "=", "", KeyAction::NudgePlus, "+"},
+        {Qt::Key_Minus, 0xBD, "-", "", KeyAction::NudgeMinus, "-"},
+        {Qt::Key_PageUp, 0x21, "", "", KeyAction::NudgePlusBig, "PageUp"},
+        {Qt::Key_PageDown, 0x22, "", "", KeyAction::NudgeMinusBig, "PageDown"},
+    };
+    return bindings;
+}
+
+MultiViewportPanel* MultiViewportPanel::PanelForWindow(const QWidget* window) {
+    for (MultiViewportPanel* panel : s_livePanels) {
+        if (panel->isVisible() && panel->window() == window) {
+            return panel;
         }
-    });
-    addShortcut(QKeySequence(Qt::Key_X), [this]() {
-        if (hoveredViewport_ && camera_.sectionEnabled) {
-            hoveredViewport_->switchSectionAxis(0);
+    }
+    return nullptr;
+}
+
+namespace {
+
+// 글자를 입력하는 칸에 포커스가 있으면 보조 처리는 손대지 않는다(이름 칸에 h/f를 칠 수 있어야 함).
+bool IsTextInputWidget(const QWidget* widget) {
+    if (!widget) {
+        return false;
+    }
+    if (const auto* edit = qobject_cast<const QLineEdit*>(widget)) {
+        return !edit->isReadOnly();
+    }
+    if (const auto* edit = qobject_cast<const QTextEdit*>(widget)) {
+        return !edit->isReadOnly();
+    }
+    if (const auto* edit = qobject_cast<const QPlainTextEdit*>(widget)) {
+        return !edit->isReadOnly();
+    }
+    if (qobject_cast<const QAbstractSpinBox*>(widget)) {
+        return true;
+    }
+    if (const auto* combo = qobject_cast<const QComboBox*>(widget)) {
+        return combo->isEditable();
+    }
+    return false;
+}
+
+// QShortcut이 못 알아본 키(KeyPress가 그대로 위젯까지 내려온 경우)를 받아서 같은 동작을 실행한다. QShortcut이
+// 정상 동작하면 KeyPress가 위젯까지 오지 않으므로 두 번 실행되지 않는다. Qt 키 코드 -> Windows 가상 키 코드 ->
+// 입력된 글자(영문/한글 자모) 순서로 맞춰 본다.
+class ViewerKeyFallbackFilter : public QObject {
+public:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() != QEvent::KeyPress || !watched->isWidgetType()) {
+            return false;
         }
-    });
-    addShortcut(QKeySequence(Qt::Key_Y), [this]() {
-        if (hoveredViewport_ && camera_.sectionEnabled) {
-            hoveredViewport_->switchSectionAxis(1);
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (keyEvent->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) {
+            return false;
         }
-    });
-    addShortcut(QKeySequence(Qt::Key_Z), [this]() {
-        if (hoveredViewport_ && camera_.sectionEnabled) {
-            hoveredViewport_->switchSectionAxis(2);
+        if (IsTextInputWidget(QApplication::focusWidget())) {
+            return false;
         }
-    });
-    auto nudge = [this](float deltaMm) {
+        MultiViewportPanel* panel = MultiViewportPanel::PanelForWindow(static_cast<QWidget*>(watched)->window());
+        if (!panel) {
+            return false;
+        }
+        const QString text = keyEvent->text().toLower();
+        for (const auto& binding : MultiViewportPanel::KeyBindings()) {
+            const bool matches = keyEvent->key() == binding.qtKey ||
+#ifdef _WIN32
+                                 (keyEvent->nativeVirtualKey() != 0 && keyEvent->nativeVirtualKey() == binding.nativeKey) ||
+#endif
+                                 (!text.isEmpty() && (text == binding.text || text == binding.altText));
+            if (matches) {
+                panel->runKeyAction(binding.action, binding.keyName, "보조 처리");
+                return true;
+            }
+        }
+        return false;
+    }
+};
+
+} // namespace
+
+void MultiViewportPanel::EnsureKeyFallbackFilter() {
+    static ViewerKeyFallbackFilter* filter = nullptr;
+    if (!filter && qApp) {
+        filter = new ViewerKeyFallbackFilter;
+        filter->setParent(qApp);
+        qApp->installEventFilter(filter);
+    }
+}
+
+void MultiViewportPanel::runKeyAction(KeyAction action, const QString& keyName, const QString& via) {
+    QString what;
+    auto nudge = [this, &what](float deltaMm) {
         if (hoveredViewport_ && camera_.sectionEnabled) {
             hoveredViewport_->nudgeSection(deltaMm);
+            what = QString("단면 %1%2mm").arg(deltaMm > 0 ? "+" : "").arg(deltaMm);
+        } else {
+            what = "단면이 꺼져 있어 무시(H로 켜기)";
         }
     };
-    // "+"/"-"는 물리 키 하나에 Shift로 두 문자를 겸하는 배열이 많아 Plus/Equal을 같이 등록.
-    // 큰 폭 이동은 +/- 대신 Page Up/Down으로 분리해서 Shift+= 입력과 안 헷갈리게 했다.
-    addShortcut(QKeySequence(Qt::Key_Plus), [nudge]() { nudge(1.0f); });
-    addShortcut(QKeySequence(Qt::Key_Equal), [nudge]() { nudge(1.0f); });
-    addShortcut(QKeySequence(Qt::Key_Minus), [nudge]() { nudge(-1.0f); });
-    addShortcut(QKeySequence(Qt::Key_PageUp), [nudge]() { nudge(10.0f); });
-    addShortcut(QKeySequence(Qt::Key_PageDown), [nudge]() { nudge(-10.0f); });
+    auto axis = [this, &what](int index) {
+        if (hoveredViewport_ && camera_.sectionEnabled) {
+            hoveredViewport_->switchSectionAxis(index);
+            what = QString("단면 축 %1").arg(QChar('X' + index));
+        } else {
+            what = "단면이 꺼져 있어 무시(H로 켜기)";
+        }
+    };
+    switch (action) {
+        case KeyAction::Fit: fitToView(); what = "화면 맞춤"; break;
+        case KeyAction::Iso: resetToIsoView(); what = "ISO 뷰"; break;
+        case KeyAction::ModePan: setMouseDragMode(MouseDragMode::Pan); what = "왼쪽 드래그 = 이동"; break;
+        case KeyAction::ModeZoom: setMouseDragMode(MouseDragMode::Zoom); what = "왼쪽 드래그 = 확대/축소"; break;
+        case KeyAction::ModeRotate: setMouseDragMode(MouseDragMode::Rotate); what = "왼쪽 드래그 = 회전"; break;
+        case KeyAction::SnapNearest: snapToNearestView(); what = "가까운 뷰 정렬"; break;
+        case KeyAction::ToggleSection:
+            if (hoveredViewport_) {
+                hoveredViewport_->toggleSection();
+            }
+            what = camera_.sectionEnabled ? "단면 켬" : "단면 끔";
+            break;
+        case KeyAction::AxisX: axis(0); break;
+        case KeyAction::AxisY: axis(1); break;
+        case KeyAction::AxisZ: axis(2); break;
+        case KeyAction::NudgePlus: nudge(1.0f); break;
+        case KeyAction::NudgeMinus: nudge(-1.0f); break;
+        case KeyAction::NudgePlusBig: nudge(10.0f); break;
+        case KeyAction::NudgeMinusBig: nudge(-10.0f); break;
+    }
+    lastKeyFeedback_ = QString("%1 → %2").arg(keyName, what);
+    if (!keyFeedbackTimer_) {
+        keyFeedbackTimer_ = new QTimer(this);
+        keyFeedbackTimer_->setSingleShot(true);
+        keyFeedbackTimer_->setInterval(2500);
+        connect(keyFeedbackTimer_, &QTimer::timeout, this, [this]() {
+            lastKeyFeedback_.clear();
+            refreshMouseDragModeLabel();
+        });
+    }
+    keyFeedbackTimer_->start();
+    refreshMouseDragModeLabel();
+    diag::Hub::instance()->NotifyShortcut(keyName, what, via);
 }
 
 // 단면 뷰(H) 컨트롤 바 - 체크박스(켜기) + X/Y/Z 축 버튼 + 방향 반전 + 슬라이더 + mm 숫자
@@ -398,8 +542,17 @@ void MultiViewportPanel::refreshMouseDragModeLabel() {
     }
     const MouseDragMode mode = s_mouseDragMode;
     const char* name = mode == MouseDragMode::Pan ? "이동" : (mode == MouseDragMode::Zoom ? "확대/축소" : "회전");
-    mouseDragModeLabel_->setText(
-        QString("왼쪽 드래그: <b>%1</b>  |  F1 이동 · F2 확대/축소 · F3 회전 · F4 가까운 뷰 정렬").arg(name));
+    QString text = QString("왼쪽 드래그: <b>%1</b>  |  F1 이동 · F2 확대/축소 · F3 회전 · F4 가까운 뷰 정렬").arg(name);
+    // § 단축키 보강(2026-11-05) - 키가 실제로 먹었는지 바로 보이게 "방금 누른 키"를 2.5초 동안 앞에 띄운다.
+    if (!lastKeyFeedback_.isEmpty()) {
+        text = QString("<span style='color:#1a7f37'>방금 누른 키: <b>%1</b></span>  |  ").arg(lastKeyFeedback_.toHtmlEscaped()) +
+               text;
+    }
+    // § 앱 진단 기록 - 그래픽 가속 없이 CPU로 그리는 중이면(원격 접속 등) 느린 이유를 화면에 바로 알린다.
+    if (diag::CurrentGlInfo().software) {
+        text += "  |  <span style='color:#c0392b'><b>그래픽 가속 없음</b>(소프트웨어 렌더링) - 큰 도면은 느릴 수 있음</span>";
+    }
+    mouseDragModeLabel_->setText(text);
 }
 
 // 컨트롤 위젯 상태를 camera_에서 다시 읽어와 맞춘다 - 키보드 단축키로 바뀐 값도

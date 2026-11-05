@@ -1,6 +1,10 @@
 #include "viewer/ModelViewport.h"
 
+#include "viewer/DiagnosticsLog.h"
+
 #include <QColor>
+#include <QDateTime>
+#include <QElapsedTimer>
 #include <QFont>
 #include <QFontMetrics>
 #include <QMouseEvent>
@@ -15,7 +19,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <memory>
 #include <vector>
 
 namespace viewer {
@@ -271,6 +277,23 @@ ModelViewport::~ModelViewport() {
 
 void ModelViewport::initializeGL() {
     initializeOpenGLFunctions();
+    // § 앱 진단 기록 - 어떤 그래픽 드라이버로 그리는지(프로세스에서 처음 한 번만 남는다). 원격 접속 등으로
+    // 그래픽 가속 없이 CPU로 그리면(소프트웨어 렌더링) 큰 도면 회전/확대가 매우 느리다.
+    {
+        auto glText = [this](GLenum name) {
+            const auto* text = reinterpret_cast<const char*>(glGetString(name));
+            return text ? QString::fromLatin1(text) : QString("?");
+        };
+        diag::GlInfo info;
+        info.vendor = glText(GL_VENDOR);
+        info.renderer = glText(GL_RENDERER);
+        info.version = glText(GL_VERSION);
+        const QString renderer = info.renderer.toLower();
+        info.software = renderer.contains("llvmpipe") || renderer.contains("softpipe") ||
+                        renderer.contains("swiftshader") || renderer.contains("gdi generic") ||
+                        renderer.contains("basic render");
+        diag::SetGlInfo(info);
+    }
     glEnable(GL_DEPTH_TEST);
     // § 뷰어 배경 흰색 변경(2026-09-11) - 어두운 배경 대신 흰 배경으로.
     glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
@@ -645,6 +668,11 @@ void ModelViewport::paintGL() {
     // Qt의 "QOpenGLWidget + QPainter 혼합" 공식 패턴을 쓴다 - 기존 raw GL 호출 구간
     // 전체를 beginNativePainting()/endNativePainting()으로 감싸고, 그 뒤에 이 QPainter로
     // 화면좌표 텍스트를 그린다(3D 투영은 이 함수 안에서 직접 계산).
+    // § 앱 진단 기록 - 이 함수 전체(QPainter 마무리 포함) 시간을 잰다. painter보다 먼저 만들어야 나중에 소멸한다.
+    QElapsedTimer frameTimer;
+    frameTimer.start();
+    const auto frameGuard = std::unique_ptr<void, std::function<void(void*)>>(
+        reinterpret_cast<void*>(1), [this, &frameTimer](void*) { noteFrameTime(frameTimer.elapsed()); });
     QPainter painter(this);
     painter.beginNativePainting();
     // § 프레임마다 깊이 테스트 상태를 명시적으로 켜서 시작 - 이전 프레임이 끝에서
@@ -847,7 +875,11 @@ void ModelViewport::paintGL() {
     // 비어있으면(스냅 대상이 없거나 시작점/끝점/중앙점/교차점처럼 확장 하이라이트가
     // 없는 점 종류) 안쪽 empty 체크에서 자연히 아무것도 안 그린다.
     if (pickModeActive_ && *pickModeActive_) {
-        if (!hoverFaceTriangles_.empty()) {
+        // § 렌더 부담 줄이기(2026-11-05) - 예전엔 매 프레임(회전/확대 중 계속) 하이라이트 정점을 다시 올렸다.
+        // 이제 호버 결과가 바뀐 뒤 처음 그릴 때만 올린다(updateHoverPick이 hoverBuffersDirty_를 켬).
+        const bool uploadHover = hoverBuffersDirty_;
+        hoverBuffersDirty_ = false;
+        if (!hoverFaceTriangles_.empty() && uploadHover) {
             std::vector<float> faceData;
             faceData.reserve(hoverFaceTriangles_.size() * 3);
             for (const auto& v : hoverFaceTriangles_) {
@@ -858,7 +890,8 @@ void ModelViewport::paintGL() {
             hoverFaceVbo_.bind();
             hoverFaceVbo_.allocate(faceData.data(), static_cast<int>(faceData.size() * sizeof(float)));
             hoverFaceVbo_.release();
-
+        }
+        if (!hoverFaceTriangles_.empty()) {
             BeginFaceHighlightPass();
             program_.setUniformValue("isHoverFacePass", true);
             program_.setUniformValue("markerColor", QVector3D(1.0f, 0.55f, 0.0f)); // 밝은 주황
@@ -868,7 +901,7 @@ void ModelViewport::paintGL() {
             program_.setUniformValue("isHoverFacePass", false);
             EndFaceHighlightPass();
         }
-        if (!hoverEdgeSegments_.empty()) {
+        if (!hoverEdgeSegments_.empty() && uploadHover) {
             std::vector<float> edgeData;
             edgeData.reserve(hoverEdgeSegments_.size() * 3);
             for (const auto& v : hoverEdgeSegments_) {
@@ -879,7 +912,8 @@ void ModelViewport::paintGL() {
             hoverEdgeVbo_.bind();
             hoverEdgeVbo_.allocate(edgeData.data(), static_cast<int>(edgeData.size() * sizeof(float)));
             hoverEdgeVbo_.release();
-
+        }
+        if (!hoverEdgeSegments_.empty()) {
             glDisable(GL_DEPTH_TEST);
             program_.setUniformValue("isLinePass", true);
             program_.setUniformValue("markerColor", QVector3D(1.0f, 0.55f, 0.0f)); // 밝은 주황
@@ -1031,6 +1065,32 @@ void ModelViewport::paintGL() {
     }
 }
 
+// § 앱 진단 기록 - 한 번 그리는 데 0.3초 넘게 걸리면 3초에 한 번까지 로그에 남긴다(무엇을 얼마나 그렸는지만).
+void ModelViewport::noteFrameTime(qint64 ms) {
+    constexpr qint64 kSlowFrameMs = 300;
+    constexpr qint64 kLogIntervalMs = 3000;
+    if (ms < kSlowFrameMs) {
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (now - lastSlowFrameLogMs_ < kLogIntervalMs) {
+        return;
+    }
+    lastSlowFrameLogMs_ = now;
+    diag::Log(QString("[느린 그리기] %1ms - 삼각형 %2개, 모서리선 %3개, 화면 %4x%5(배율 %6%), 단면 %7, "
+                      "하이라이트 %8/%9개, %10")
+                  .arg(ms)
+                  .arg(triangleVertexCount_ / 3)
+                  .arg(edgeVertexCount_ / 2)
+                  .arg(width())
+                  .arg(height())
+                  .arg(qRound(devicePixelRatioF() * 100.0))
+                  .arg(sharedCamera_->sectionEnabled ? "켬" : "끔")
+                  .arg(hoverFaceTriangles_.size() / 3)
+                  .arg(capturedFaceTriangles_.size() / 3)
+                  .arg(diag::MemoryUsageText()));
+}
+
 void ModelViewport::mousePressEvent(QMouseEvent* event) {
     lastMousePos_ = event->pos();
     // 단축키(F/H/I/X/Y/Z/+/-)는 이제 이 위젯의 키보드 포커스가 아니라 MultiViewportPanel의
@@ -1165,6 +1225,7 @@ void ModelViewport::updateHoverPick() {
         hoverPickValid_ = false;
         hoverFaceTriangles_.clear();
         hoverEdgeSegments_.clear();
+        hoverBuffersDirty_ = true;
         if (computeSectionRay(rayOrigin, rayDir)) {
             const geometry::Vec3 origin{rayOrigin.x(), rayOrigin.y(), rayOrigin.z()};
             const geometry::Vec3 dir{rayDir.x(), rayDir.y(), rayDir.z()};

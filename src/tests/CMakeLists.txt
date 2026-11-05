@@ -25,3 +25,12 @@ target_link_libraries(diag_measure_matching PRIVATE geometry rule)
 # § 뷰어 점검(2026-11-04) - 실제 STEP으로 뷰어를 띄워 조작 경로를 한 번씩 거친다(Debug 힙 검사용, 창이 뜸).
 add_executable(diag_viewer_smoke diag_viewer_smoke.cpp)
 target_link_libraries(diag_viewer_smoke PRIVATE viewer geometry Qt6::Widgets)
+
+# § 뷰어 입력 점검(2026-11-05) - 실제 키/마우스 입력을 흉내 내서 단축키와 조작 속도를 확인.
+# 키 입력 흉내(QWindowSystemInterface)에 Qt 비공개 헤더가 필요해서, 그게 없는 설치(회사PC 등)에선 건너뛴다.
+set(QT_NO_PRIVATE_MODULE_WARNING ON)
+find_package(Qt6 QUIET COMPONENTS GuiPrivate)
+if(TARGET Qt6::GuiPrivate)
+    add_executable(diag_viewer_input diag_viewer_input.cpp)
+    target_link_libraries(diag_viewer_input PRIVATE ui viewer geometry database Qt6::Widgets Qt6::GuiPrivate)
+endif()
