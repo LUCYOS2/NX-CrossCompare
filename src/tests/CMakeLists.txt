@@ -27,10 +27,13 @@ add_executable(diag_viewer_smoke diag_viewer_smoke.cpp)
 target_link_libraries(diag_viewer_smoke PRIVATE viewer geometry Qt6::Widgets)
 
 # § 뷰어 입력 점검(2026-11-05) - 실제 키/마우스 입력을 흉내 내서 단축키와 조작 속도를 확인.
-# 키 입력 흉내(QWindowSystemInterface)에 Qt 비공개 헤더가 필요해서, 그게 없는 설치(회사PC 등)에선 건너뛴다.
-set(QT_NO_PRIVATE_MODULE_WARNING ON)
-find_package(Qt6 QUIET COMPONENTS GuiPrivate)
-if(TARGET Qt6::GuiPrivate)
+# 키 입력 흉내(QWindowSystemInterface)에 Qt 비공개 API가 필요하다 - 비공개 API는 Qt 버전마다 함수 모양이 달라서
+# 다른 Qt가 깔린 PC(회사PC 등)에서는 빌드가 깨질 수 있다. 개발PC 전용이라 기본은 끄고,
+# 필요할 때 cmake -DNX_BUILD_INPUT_DIAG=ON 으로 켠다.
+option(NX_BUILD_INPUT_DIAG "개발PC 전용 뷰어 입력 점검 도구(diag_viewer_input)" OFF)
+if(NX_BUILD_INPUT_DIAG)
+    set(QT_NO_PRIVATE_MODULE_WARNING ON)
+    find_package(Qt6 REQUIRED COMPONENTS GuiPrivate)
     add_executable(diag_viewer_input diag_viewer_input.cpp)
     target_link_libraries(diag_viewer_input PRIVATE ui viewer geometry database Qt6::Widgets Qt6::GuiPrivate)
 endif()

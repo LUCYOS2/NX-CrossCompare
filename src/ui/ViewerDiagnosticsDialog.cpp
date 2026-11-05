@@ -15,6 +15,7 @@
 #include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QStringList>
 #include <QTime>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -31,6 +32,27 @@ QString KeyName(const QKeyEvent* key) {
     return name.isEmpty() ? QString("0x%1").arg(key->key(), 0, 16) : name;
 }
 
+// 예전 Qt(6.2 미만)에도 있는 함수만 쓴다 - QFlags::toInt()는 6.2부터라 회사PC Qt에 없을 수 있다.
+QString ModifierText(Qt::KeyboardModifiers modifiers) {
+    QStringList names;
+    if (modifiers & Qt::ShiftModifier) {
+        names << "Shift";
+    }
+    if (modifiers & Qt::ControlModifier) {
+        names << "Ctrl";
+    }
+    if (modifiers & Qt::AltModifier) {
+        names << "Alt";
+    }
+    if (modifiers & Qt::MetaModifier) {
+        names << "Win";
+    }
+    if (modifiers & Qt::KeypadModifier) {
+        names << "숫자패드";
+    }
+    return names.isEmpty() ? QString() : QString(", 조합키 %1").arg(names.join('+'));
+}
+
 QString Describe(const QKeyEvent* key, const QObject* receiver) {
     QString text = key->text();
     QString shown;
@@ -43,7 +65,7 @@ QString Describe(const QKeyEvent* key, const QObject* receiver) {
         .arg(key->nativeVirtualKey(), 0, 16)
         .arg(key->nativeScanCode(), 0, 16)
         .arg(shown)
-        .arg(key->modifiers() != Qt::NoModifier ? QString(", 조합키 %1").arg(key->modifiers().toInt(), 0, 16) : QString())
+        .arg(ModifierText(key->modifiers()))
         .arg(receiver ? receiver->metaObject()->className() : "?");
 }
 
