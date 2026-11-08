@@ -1,6 +1,7 @@
 #include "ui/PresetDimensionDialog.h"
 
 #include "rule/RuleEngine.h"
+#include "viewer/DiagnosticsLog.h"
 #include "viewer/MultiViewportPanel.h"
 
 #include <QAbstractItemView>
@@ -9,11 +10,13 @@
 #include <QComboBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QScreen>
 #include <QTableWidget>
 #include <QTableWidgetItem>
 #include <QTimer>
@@ -28,8 +31,10 @@
 namespace ui {
 
 namespace {
-constexpr int kViewerMinWidth = 760;
-constexpr int kViewerMinHeight = 560;
+// 회사PC처럼 화면이 작거나 배율이 크면 창이 화면 밖으로 넘쳐 목록/안내가 잘려 보였다(2026-11-06) -
+// 뷰어 최소 크기를 줄이고 창 크기는 화면 안으로 맞춘다.
+constexpr int kViewerMinWidth = 480;
+constexpr int kViewerMinHeight = 360;
 constexpr int kFixedColumns = 3; // 이름 / 기준 인치 값 / 설명 - 그 뒤는 "모든 인치에서 확인" 결과 열
 
 double Component(const geometry::Vec3& v, int axis) {
@@ -46,6 +51,35 @@ QVector3D ToQt(const geometry::Vec3& v) {
 
 int AxisIndex(const std::string& axis) {
     return axis == "X" ? 0 : (axis == "Y" ? 1 : 2);
+}
+
+// 형상 평면을 축과의 각도로 나눈 개수 - 후보가 안 나올 때 이유를 보여주려고(2026-11-06, 회사PC "목록 자체가
+// 안 생긴다"). 사출품은 옆면에 구배(보통 1~3도)가 있어서 축 수직 허용(0.5도)을 넘으면 끝면에서 빠진다.
+struct PlaneAngleCounts {
+    int aligned = 0;  // 축과 0.5도 안
+    int drafted = 0;  // 0.5~5도 (구배로 보이는 면)
+    int other = 0;    // 그 밖
+};
+PlaneAngleCounts CountPlaneAngles(const std::vector<geometry::PlaneCandidate>& planes) {
+    PlaneAngleCounts counts;
+    for (const auto& plane : planes) {
+        const auto& n = plane.normal;
+        const double len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+        if (len < 1e-12) {
+            ++counts.other;
+            continue;
+        }
+        const double maxComponent = std::max({std::abs(n.x), std::abs(n.y), std::abs(n.z)}) / len;
+        const double angleDeg = std::acos(std::min(1.0, maxComponent)) * 180.0 / 3.14159265358979323846;
+        if (angleDeg <= rule::kPresetFaceAxisToleranceDeg) {
+            ++counts.aligned;
+        } else if (angleDeg <= 5.0) {
+            ++counts.drafted;
+        } else {
+            ++counts.other;
+        }
+    }
+    return counts;
 }
 
 // 모델 목록 라벨("50\"  파일.stp")의 앞자리 인치. 인치가 없는 라벨이면 0.
@@ -73,7 +107,14 @@ PresetDimensionDialog::PresetDimensionDialog(
       targetHandle_(targetHandle),
       presetName_(presetName) {
     setWindowTitle("프리셋 자동 치수");
-    resize(1400, 860);
+    {
+        QSize size(1400, 860);
+        if (const QScreen* screen = parent ? parent->screen() : QGuiApplication::primaryScreen()) {
+            const QRect available = screen->availableGeometry();
+            size = size.boundedTo(QSize(available.width() * 95 / 100, available.height() * 90 / 100));
+        }
+        resize(size);
+    }
 
     // ---- 좌측: 미리보기 뷰어(대표 인치 하나) ----
     std::vector<std::pair<std::string, geometry::ModelHandle>> targetModel;
@@ -148,6 +189,7 @@ PresetDimensionDialog::PresetDimensionDialog(
 
     statusLabel_ = new QLabel(this);
     statusLabel_->setWordWrap(true);
+    statusLabel_->setStyleSheet("font-weight: bold;");
 
     auto* guide = new QLabel(
         "프리셋과 비슷한 형상에서, 버니어가 실제로 닿는 평면 끝면 사이의 치수만 후보로 만듭니다.\n"
@@ -163,14 +205,16 @@ PresetDimensionDialog::PresetDimensionDialog(
                                           .arg(QString::fromStdString(presetName_), targetLabel),
                                       this));
     rightLayout->addLayout(shapeRow);
+    // 상태(찾은 형상/후보 개수, 못 찾은 이유)는 창이 화면에서 잘려도 보이도록 위쪽에 둔다.
+    rightLayout->addWidget(statusLabel_);
     rightLayout->addWidget(guide);
     rightLayout->addWidget(table_, 1);
     rightLayout->addLayout(toleranceRow);
     rightLayout->addLayout(actionRow);
-    rightLayout->addWidget(statusLabel_);
     auto* rightWidget = new QWidget(this);
     rightWidget->setLayout(rightLayout);
-    rightWidget->setMinimumWidth(520);
+    rightWidget->setMinimumWidth(440);
+    table_->setMinimumHeight(160);
 
     auto* topRow = new QHBoxLayout();
     topRow->addWidget(viewerPanel_, 1);
@@ -185,10 +229,14 @@ PresetDimensionDialog::PresetDimensionDialog(
 
     // ---- 형상 찾기(대표 인치) ----
     QApplication::setOverrideCursor(Qt::WaitCursor);
+    QElapsedTimer timer;
+    timer.start();
     modelBox_ = adapter_->GetBoundingBox(targetHandle_);
     modelPlanes_ = adapter_->FindPlaneCandidates(targetHandle_, "Datum_Plane", std::string());
     shapes_ = adapter_->FindPatchCandidates(targetHandle_, descriptor, geometry::kPatchSimilarityThreshold);
+    const qint64 searchMs = timer.elapsed();
     QApplication::restoreOverrideCursor();
+    LogSearchSummary(searchMs, targetModel.size());
 
     {
         const QSignalBlocker blocker(shapeCombo_);
@@ -200,7 +248,9 @@ PresetDimensionDialog::PresetDimensionDialog(
         }
     }
     if (shapes_.empty()) {
-        statusLabel_->setText("대표 인치 모델에서 이 프리셋과 비슷한 형상을 찾지 못했습니다.");
+        statusLabel_->setText(targetModel.empty()
+                                  ? "대표 인치 모델을 찾지 못했습니다 - 규칙 관리 창의 대표 인치를 다시 골라 주세요."
+                                  : "대표 인치 모델에서 이 프리셋과 비슷한 형상을 찾지 못했습니다.");
         checkAllInchesButton_->setEnabled(false);
         saveButton_->setEnabled(false);
         focusButton->setEnabled(false);
@@ -245,14 +295,64 @@ void PresetDimensionDialog::OnShapeChanged() {
         table_->setItem(static_cast<int>(row), 2, descItem);
     }
     if (candidates_.empty()) {
+        const PlaneAngleCounts counts = (index >= 0 && index < static_cast<int>(shapes_.size()))
+                                            ? CountPlaneAngles(shapes_[static_cast<size_t>(index)].planes)
+                                            : PlaneAngleCounts{};
         statusLabel_->setText(
-            "이 형상에서는 잴 만한 평면 끝면 쌍을 찾지 못했습니다 - 끝이 곡면이거나 축에 기울어진 형상일 수 있습니다. "
-            "이 경우는 \"지정...\"으로 직접 찍어 주세요.");
+            QString("형상 %1개를 찾았지만 이 형상에서는 잴 만한 평면 끝면 쌍을 찾지 못했습니다. "
+                    "이 형상의 평면 %2개 = 축에 수직 %3개 + 조금 기울어짐(0.5~5도, 구배로 보임) %4개 + 그 밖 %5개. "
+                    "지금은 축에 수직인 면만 씁니다 - \"지정...\"으로 직접 찍어 주세요.")
+                .arg(shapes_.size())
+                .arg(counts.aligned + counts.drafted + counts.other)
+                .arg(counts.aligned)
+                .arg(counts.drafted)
+                .arg(counts.other));
     } else {
-        statusLabel_->setText(QString("치수 후보 %1개").arg(candidates_.size()));
+        statusLabel_->setText(QString("형상 %1개 찾음 - 이 형상의 치수 후보 %2개").arg(shapes_.size()).arg(candidates_.size()));
         table_->setCurrentCell(0, 0);
     }
     RefreshPreview();
+}
+
+// § 진단 기록(2026-11-06) - 회사PC에서 "화면 확대도 안 되고 후보 목록도 안 생긴다"는 리포트. 무엇이 비었는지
+// (모델/형상/평면/후보) 앱 로그(diag_logs/app_log.txt)에 남긴다. 도면 정보(좌표/치수/파일명)는 쓰지 않고
+// 개수와 모델 대비 비율(%)만 쓴다.
+void PresetDimensionDialog::LogSearchSummary(qint64 searchMs, size_t viewerModelCount) const {
+    auto diagonal = [](const geometry::BoundingBox& box) {
+        const double dx = box.max.x - box.min.x;
+        const double dy = box.max.y - box.min.y;
+        const double dz = box.max.z - box.min.z;
+        return std::sqrt(dx * dx + dy * dy + dz * dz);
+    };
+    const double modelDiagonal = diagonal(modelBox_);
+    viewer::diag::Log(QString("[프리셋 자동 치수] 뷰어 모델 %1개, 모델 평면 %2개, 찾은 형상 %3개, 찾는 데 %4ms")
+                          .arg(viewerModelCount)
+                          .arg(modelPlanes_.size())
+                          .arg(shapes_.size())
+                          .arg(searchMs));
+    const size_t shown = std::min<size_t>(shapes_.size(), 10);
+    for (size_t i = 0; i < shown; ++i) {
+        const auto& shape = shapes_[i];
+        const auto candidates = rule::ComputePresetDimensionCandidates(shape, modelBox_, modelPlanes_);
+        int sizeCount = 0;
+        for (const auto& c : candidates) {
+            sizeCount += c.kind == rule::PresetDimensionKind::ShapeSize ? 1 : 0;
+        }
+        const double ratio = (shape.hasBox && modelDiagonal > 0.0) ? diagonal(shape.box) / modelDiagonal * 100.0 : -1.0;
+        const PlaneAngleCounts counts = CountPlaneAngles(shape.planes);
+        viewer::diag::Log(QString("[프리셋 자동 치수]   형상 %1: 유사도 %2, 범위 있음 %3, 형상 크기/모델 크기 %4%, "
+                                  "형상 평면 %5개(축 수직 %6 / 0.5~5도 %7 / 그 밖 %8), 후보 크기 %9개 + 위치 %10개")
+                              .arg(i + 1)
+                              .arg(shape.similarity, 0, 'f', 2)
+                              .arg(shape.hasBox ? "예" : "아니오")
+                              .arg(ratio, 0, 'f', 1)
+                              .arg(shape.planes.size())
+                              .arg(counts.aligned)
+                              .arg(counts.drafted)
+                              .arg(counts.other)
+                              .arg(sizeCount)
+                              .arg(static_cast<int>(candidates.size()) - sizeCount));
+    }
 }
 
 std::string PresetDimensionDialog::ChooseOffsetAxis(int measuredAxis) const {

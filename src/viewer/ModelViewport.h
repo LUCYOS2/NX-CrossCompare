@@ -319,6 +319,20 @@ private:
     QVector3D dimensionOffsetAxisWorld_;
     bool hasDimensionOffsetAxis_ = false;
     bool draggingDimensionOffset_ = false;
+
+    // § 그래픽 초기화 전 데이터 유실 수정(2026-11-06) - 창이 뜨기 전(initializeGL 전)에 마커/치수선을
+    // 넘기면 개수만 남고 GPU 버퍼는 비어서, 점이 엉뚱한 한 곳에 몰려 그려졌다(회사PC "프리셋 자동 치수"
+    // 리포트 - "주황점이 이상한데 한 점으로 잡혀 있다"). 이제 정점 데이터를 CPU 쪽에 들고 있다가
+    // 초기화가 끝나면(initializeGL 끝) 올린다. Upload*는 GL 컨텍스트가 잡힌 상태에서만 부른다.
+    bool glReady_ = false;
+    std::vector<float> markerData_;
+    std::vector<float> lineData_;
+    std::vector<float> arrowData_;
+    std::vector<float> extLineData_;
+    void UploadMarkerBuffer();
+    void UploadDimensionLineBuffers();
+    void UploadExtLineBuffer();
+    void UploadCapturedPatchBuffer();
 };
 
 } // namespace viewer

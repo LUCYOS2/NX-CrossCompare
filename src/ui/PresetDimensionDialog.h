@@ -48,6 +48,7 @@ private:
     // 체크 여부와 무관하게 row 후보를 저장될 모양 그대로(기준 인치 주변 지문까지) 만든다.
     rule::Rule BuildRule(int row) const;
     std::string ChooseOffsetAxis(int measuredAxis) const;
+    void LogSearchSummary(qint64 searchMs, size_t viewerModelCount) const;
 
     database::Database* db_;
     int projectId_;

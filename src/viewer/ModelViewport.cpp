@@ -444,41 +444,47 @@ void ModelViewport::initializeGL() {
     extLineVbo_.release();
 
     program_.release();
+
+    // 초기화 전에 받아 둔 마커/치수선/하이라이트를 지금 올린다(이 함수 안에서는 컨텍스트가 잡혀 있다).
+    glReady_ = true;
+    UploadMarkerBuffer();
+    UploadDimensionLineBuffers();
+    UploadExtLineBuffer();
+    UploadCapturedPatchBuffer();
 }
 
-void ModelViewport::resizeGL(int w, int h) {
-    glViewport(0, 0, w, h);
-}
-
-void ModelViewport::SetMarkerPositions(const std::vector<QVector3D>& worldPositions) {
-    markerCount_ = static_cast<int>(worldPositions.size());
-    if (markerCount_ == 0) {
-        update();
+void ModelViewport::UploadMarkerBuffer() {
+    if (markerData_.empty()) {
         return;
     }
-    std::vector<float> data;
-    data.reserve(worldPositions.size() * 3);
-    for (const auto& p : worldPositions) {
-        data.push_back(p.x());
-        data.push_back(p.y());
-        data.push_back(p.z());
-    }
-    makeCurrent();
     markerVbo_.bind();
-    markerVbo_.allocate(data.data(), static_cast<int>(data.size() * sizeof(float)));
+    markerVbo_.allocate(markerData_.data(), static_cast<int>(markerData_.size() * sizeof(float)));
     markerVbo_.release();
-    doneCurrent();
-    update();
 }
 
-void ModelViewport::SetCapturedPatchHighlight(const std::vector<geometry::Vec3>& worldTriangles) {
-    capturedFaceTriangles_.clear();
-    capturedFaceTriangles_.reserve(worldTriangles.size());
-    for (const auto& v : worldTriangles) {
-        capturedFaceTriangles_.emplace_back(static_cast<float>(v.x), static_cast<float>(v.y),
-                                             static_cast<float>(v.z));
+void ModelViewport::UploadDimensionLineBuffers() {
+    if (!lineData_.empty()) {
+        lineVbo_.bind();
+        lineVbo_.allocate(lineData_.data(), static_cast<int>(lineData_.size() * sizeof(float)));
+        lineVbo_.release();
     }
-    makeCurrent();
+    if (!arrowData_.empty()) {
+        arrowVbo_.bind();
+        arrowVbo_.allocate(arrowData_.data(), static_cast<int>(arrowData_.size() * sizeof(float)));
+        arrowVbo_.release();
+    }
+}
+
+void ModelViewport::UploadExtLineBuffer() {
+    if (extLineData_.empty()) {
+        return;
+    }
+    extLineVbo_.bind();
+    extLineVbo_.allocate(extLineData_.data(), static_cast<int>(extLineData_.size() * sizeof(float)));
+    extLineVbo_.release();
+}
+
+void ModelViewport::UploadCapturedPatchBuffer() {
     std::vector<float> data;
     data.reserve(capturedFaceTriangles_.size() * 3);
     for (const auto& v : capturedFaceTriangles_) {
@@ -495,7 +501,41 @@ void ModelViewport::SetCapturedPatchHighlight(const std::vector<geometry::Vec3>&
         capturedFaceVbo_.allocate(data.data(), static_cast<int>(data.size() * sizeof(float)));
     }
     capturedFaceVbo_.release();
-    doneCurrent();
+}
+
+void ModelViewport::resizeGL(int w, int h) {
+    glViewport(0, 0, w, h);
+}
+
+void ModelViewport::SetMarkerPositions(const std::vector<QVector3D>& worldPositions) {
+    markerCount_ = static_cast<int>(worldPositions.size());
+    markerData_.clear();
+    markerData_.reserve(worldPositions.size() * 3);
+    for (const auto& p : worldPositions) {
+        markerData_.push_back(p.x());
+        markerData_.push_back(p.y());
+        markerData_.push_back(p.z());
+    }
+    if (glReady_ && !markerData_.empty()) {
+        makeCurrent();
+        UploadMarkerBuffer();
+        doneCurrent();
+    }
+    update();
+}
+
+void ModelViewport::SetCapturedPatchHighlight(const std::vector<geometry::Vec3>& worldTriangles) {
+    capturedFaceTriangles_.clear();
+    capturedFaceTriangles_.reserve(worldTriangles.size());
+    for (const auto& v : worldTriangles) {
+        capturedFaceTriangles_.emplace_back(static_cast<float>(v.x), static_cast<float>(v.y),
+                                             static_cast<float>(v.z));
+    }
+    if (glReady_) {
+        makeCurrent();
+        UploadCapturedPatchBuffer();
+        doneCurrent();
+    }
     update();
 }
 
@@ -506,22 +546,22 @@ void ModelViewport::SetDimensionExtensionLines(
         update();
         return;
     }
-    std::vector<float> data;
-    data.reserve(fromPoints.size() * 6);
+    extLineData_.clear();
+    extLineData_.reserve(fromPoints.size() * 6);
     for (size_t i = 0; i < fromPoints.size(); ++i) {
         for (const QVector3D& v : {fromPoints[i], toPoints[i]}) {
-            data.push_back(v.x());
-            data.push_back(v.y());
-            data.push_back(v.z());
+            extLineData_.push_back(v.x());
+            extLineData_.push_back(v.y());
+            extLineData_.push_back(v.z());
         }
     }
-    extLineVertexCount_ = static_cast<int>(data.size() / 3);
+    extLineVertexCount_ = static_cast<int>(extLineData_.size() / 3);
 
-    makeCurrent();
-    extLineVbo_.bind();
-    extLineVbo_.allocate(data.data(), static_cast<int>(data.size() * sizeof(float)));
-    extLineVbo_.release();
-    doneCurrent();
+    if (glReady_) {
+        makeCurrent();
+        UploadExtLineBuffer();
+        doneCurrent();
+    }
     update();
 }
 
@@ -558,13 +598,15 @@ void ModelViewport::SetDimensionLine(const std::vector<QVector3D>& worldPoints) 
     if (worldPoints.size() < 2) {
         lineVertexCount_ = 0;
         arrowVertexCount_ = 0;
+        lineData_.clear();
+        arrowData_.clear();
         hasDimensionLine_ = false;
         update();
         return;
     }
     const QVector3D& a = worldPoints[0];
     const QVector3D& b = worldPoints[1];
-    const float data[6] = {a.x(), a.y(), a.z(), b.x(), b.y(), b.z()};
+    lineData_ = {a.x(), a.y(), a.z(), b.x(), b.y(), b.z()};
     lineVertexCount_ = 2;
     // § 치수선 중앙 라벨 - Point(부위) 이니셜을 그릴 위치(paintGL의 QPainter 패스).
     dimensionLineMidpoint_ = (a + b) * 0.5f;
@@ -574,7 +616,8 @@ void ModelViewport::SetDimensionLine(const std::vector<QVector3D>& worldPoints) 
     // 12%를 화살촉 길이로 쓴다(짧은 선에서도, 긴 선에서도 자연스럽게 스케일).
     QVector3D dir = b - a;
     const float lineLen = dir.length();
-    std::vector<float> arrowData;
+    std::vector<float>& arrowData = arrowData_;
+    arrowData.clear();
     if (lineLen > 1e-6f) {
         dir /= lineLen;
         // § 화살촉 안 보임 버그 수정(2026-09-13) - "XY 화면에서는 화살표가 안 보이는데
@@ -610,16 +653,11 @@ void ModelViewport::SetDimensionLine(const std::vector<QVector3D>& worldPoints) 
     }
     arrowVertexCount_ = static_cast<int>(arrowData.size() / 3);
 
-    makeCurrent();
-    lineVbo_.bind();
-    lineVbo_.allocate(data, static_cast<int>(sizeof(data)));
-    lineVbo_.release();
-    if (arrowVertexCount_ > 0) {
-        arrowVbo_.bind();
-        arrowVbo_.allocate(arrowData.data(), static_cast<int>(arrowData.size() * sizeof(float)));
-        arrowVbo_.release();
+    if (glReady_) {
+        makeCurrent();
+        UploadDimensionLineBuffers();
+        doneCurrent();
     }
-    doneCurrent();
     update();
 }
 
