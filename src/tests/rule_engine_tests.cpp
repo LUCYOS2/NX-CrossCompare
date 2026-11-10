@@ -1,5 +1,6 @@
 #include "geometry/MockGeometryAdapter.h"
 #include "rule/BuiltInCatalog.h"
+#include "rule/CtpCapture.h"
 #include "rule/Matching.h"
 #include "rule/Measure.h"
 #include "rule/PresetDimensions.h"
@@ -664,6 +665,94 @@ void TestPresetDimensionCandidatesAndRulesAcrossInches() {
     }
 }
 
+// § CTP 캡처 이미지(2026-11-09) - Y로 20mm 압출된 후크(단면 윤곽은 XZ 평면, X 10 x Z 10).
+// 옆면 넓이: X면 2개(20x10), 윗면(10x20), Y 끝면 2개(10x10).
+std::vector<geometry::PlaneCandidate> ExtrudedHookPlanes() {
+    using geometry::Vec3;
+    return {AxisFace(0, -1.0, Vec3{0, 0, 0}, Vec3{0, 20, 10}), AxisFace(0, 1.0, Vec3{10, 0, 0}, Vec3{10, 20, 10}),
+            AxisFace(2, 1.0, Vec3{0, 0, 10}, Vec3{10, 20, 10}), AxisFace(1, -1.0, Vec3{0, 0, 0}, Vec3{10, 0, 10}),
+            AxisFace(1, 1.0, Vec3{0, 20, 0}, Vec3{10, 20, 10})};
+}
+
+rule::CtpDimensionInput Dim(const char* label, int axis, const geometry::Vec3& a, const geometry::Vec3& b) {
+    rule::CtpDimensionInput d;
+    d.label = label;
+    d.axis = axis;
+    d.measureA = a;
+    d.measureB = b;
+    return d;
+}
+
+bool InsideView(const rule::CtpCaptureView& v, const geometry::Vec3& p) {
+    auto get = [](const geometry::Vec3& q, int axis) { return axis == 0 ? q.x : (axis == 1 ? q.y : q.z); };
+    return std::abs(get(p, v.rightAxis) - get(v.center, v.rightAxis)) <= v.halfWidth + 1e-9 &&
+           std::abs(get(p, v.upAxis) - get(v.center, v.upAxis)) <= v.halfHeight + 1e-9;
+}
+
+void TestCtpCapturePlanPicksProfileViewAndPlacesDimensions() {
+    using geometry::Vec3;
+    const geometry::BoundingBox box{Vec3{0, 0, 0}, Vec3{10, 20, 10}};
+    const auto planes = ExtrudedHookPlanes();
+    const double aspect = 2.35;
+
+    // 높이(Z) + 걸림량(X): 둘 다에 수직인 축은 Y뿐 - 단면 윤곽을 Y 방향에서 본다.
+    const auto plan = rule::PlanCtpCapture(
+        {Dim("A", 2, Vec3{10, 10, 0}, Vec3{10, 10, 10}), Dim("B", 0, Vec3{8, 10, 10}, Vec3{10, 10, 10})}, box, planes,
+        aspect);
+    Check(plan.ok && plan.view.viewAxis == 1, "height Z + catch X should be viewed along Y");
+    Check(plan.warning.empty() && plan.dims[0].visible && plan.dims[1].visible, "both dimensions should be drawable");
+    Check(plan.view.sectionEnabled && plan.view.sectionAxis == 1 && std::abs(plan.view.sectionCoord - 10.0) < 1e-9 &&
+              plan.view.sectionSign == plan.view.viewSign,
+          "section should cut the camera-side half at the feature centre");
+    Check(plan.view.upAxis == 2 && plan.view.rightAxis == 0, "with Z in the picture plane Z should point up");
+    // 시선 -Y, 위 +Z -> 화면 오른쪽 = -X (오른손 좌표계).
+    Check(plan.view.viewSign < 0 && plan.view.rightSign < 0, "looking down -Y with Z up puts -X on the right");
+    Check(plan.dims[1].lineA.z > box.max.z && std::abs(plan.dims[1].lineA.z - plan.dims[1].lineB.z) < 1e-9,
+          "horizontal dimension line goes above the feature");
+    Check(plan.dims[0].lineA.x < box.min.x && std::abs(plan.dims[0].lineA.x - plan.dims[0].lineB.x) < 1e-9,
+          "vertical dimension line goes to the screen right (= -X here)");
+    Check(std::abs(plan.dims[0].lineB.z - plan.dims[0].lineA.z - 10.0) < 1e-9,
+          "moving the dimension line must keep the measured length");
+    Check(std::abs(plan.view.halfWidth / plan.view.halfHeight - aspect) < 1e-9, "frame should match the image aspect");
+    for (const auto& d : plan.dims) {
+        Check(InsideView(plan.view, d.lineA) && InsideView(plan.view, d.lineB) && InsideView(plan.view, d.measureA),
+              "frame should contain every dimension line and measured point");
+    }
+    Check(InsideView(plan.view, box.min) && InsideView(plan.view, box.max), "frame should contain the feature");
+
+    // 높이(Z) 하나: X/Y 둘 다 가능하지만 옆면이 넓은(압출 방향) Y에서 봐야 단면 윤곽이 보인다.
+    const auto heightOnly = rule::PlanCtpCapture({Dim("A", 2, Vec3{10, 10, 0}, Vec3{10, 10, 10})}, box, planes, aspect);
+    Check(heightOnly.ok && heightOnly.view.viewAxis == 1, "a single height should be viewed along the extrusion axis");
+
+    // 같은 쪽 치수 두 개는 짧은 것이 안쪽.
+    const auto stacked = rule::PlanCtpCapture(
+        {Dim("A", 0, Vec3{0, 10, 10}, Vec3{10, 10, 10}), Dim("B", 0, Vec3{8, 10, 10}, Vec3{10, 10, 10})}, box, planes,
+        aspect);
+    Check(stacked.ok && stacked.dims[1].lineA.z < stacked.dims[0].lineA.z, "shorter dimension should sit closer");
+
+    // X/Y/Z 세 축을 한 이미지에: 시선 방향 치수 하나는 그릴 수 없다고 알려야 한다.
+    const auto threeAxes = rule::PlanCtpCapture({Dim("A", 0, Vec3{0, 0, 0}, Vec3{10, 0, 0}),
+                                                 Dim("B", 1, Vec3{0, 0, 0}, Vec3{0, 20, 0}),
+                                                 Dim("C", 2, Vec3{0, 0, 0}, Vec3{0, 0, 10})},
+                                                box, planes, aspect);
+    int hidden = 0;
+    for (const auto& d : threeAxes.dims) {
+        hidden += d.visible ? 0 : 1;
+    }
+    Check(threeAxes.ok && hidden == 1 && !threeAxes.warning.empty(), "the dimension along the view axis is reported");
+    Check(!rule::PlanCtpCapture({}, box, planes, aspect).ok, "no dimensions -> no plan");
+
+    // 보조선은 측정면에서 치수선에 가장 가까운 끝에서 시작한다(측정점이 면 아래쪽에 있어도).
+    auto withFaces = Dim("A", 0, Vec3{0, 10, 2}, Vec3{10, 10, 2});
+    withFaces.hasFaceBoxes = true;
+    withFaces.faceBoxA = geometry::BoundingBox{Vec3{0, 0, 0}, Vec3{0, 20, 10}};
+    withFaces.faceBoxB = geometry::BoundingBox{Vec3{10, 0, 0}, Vec3{10, 20, 7}};
+    const auto ext = rule::PlanCtpCapture({withFaces}, box, planes, aspect);
+    Check(ext.ok && std::abs(ext.dims[0].extA.z - 10.0) < 1e-9 && std::abs(ext.dims[0].extB.z - 7.0) < 1e-9,
+          "extension lines should start at the face edge nearest the dimension line");
+    Check(std::abs(ext.dims[0].measureA.z - 2.0) < 1e-9, "the measured point itself is kept");
+}
+
 } // namespace
 
 int main() {
@@ -695,6 +784,7 @@ int main() {
         {"TestTrendOutlierNeedsFourPointsAndPicksWorst", TestTrendOutlierNeedsFourPointsAndPicksWorst},
         {"TestConsistencyWarningsMarkSuspectValues", TestConsistencyWarningsMarkSuspectValues},
         {"TestPresetDimensionCandidatesAndRulesAcrossInches", TestPresetDimensionCandidatesAndRulesAcrossInches},
+        {"TestCtpCapturePlanPicksProfileViewAndPlacesDimensions", TestCtpCapturePlanPicksProfileViewAndPlacesDimensions},
     };
     for (const auto& test : tests) {
         try {

@@ -4,8 +4,11 @@
 #include <QOpenGLFunctions_3_3_Core>
 #include <QOpenGLShaderProgram>
 #include <QOpenGLVertexArrayObject>
+#include <QImage>
+#include <QMatrix4x4>
 #include <QOpenGLWidget>
 #include <QPixmap>
+#include <QSize>
 #include <QPoint>
 #include <QPointF>
 #include <QRect>
@@ -23,6 +26,27 @@ class QTimer;
 class QMouseEvent;
 
 namespace viewer {
+
+// § CTP 캡처 이미지(2026-11-09) - 화면 창 크기/카메라와 상관없이 정해진 구도·해상도로 CTP 양식용 그림을 만든다.
+// 구도 계산은 rule::PlanCtpCapture(순수 계산), 이 구조체들은 그 결과를 뷰어 좌표로 옮긴 것.
+struct CtpRenderView {
+    QVector3D center;          // 화면 중심(월드)
+    QVector3D viewDir;         // 시선 방향(카메라 -> 형상)
+    QVector3D up;              // 화면 위쪽
+    float halfWidth = 1.0f;    // 화면 절반 너비/높이(mm, 직교 투영)
+    float halfHeight = 1.0f;
+    bool sectionEnabled = false;
+    int sectionAxis = 0;
+    float sectionCoord = 0.0f;
+    float sectionSign = 1.0f;  // 셰이더 관례: (p[axis] - coord) * sign < 0 인 쪽을 버린다
+};
+struct CtpRenderDimension {
+    QVector3D measureA;        // 실제 측정점 - 보조선(연장선)이 여기서 시작한다
+    QVector3D measureB;
+    QVector3D lineA;           // 여백으로 뺀 치수선 양 끝
+    QVector3D lineB;
+    QString label;             // "A" - 치수선 가운데 원 안에 쓴다
+};
 
 // 인치 1개 = ModelViewport 1개. MultiViewportPanel이 여러 개를 그리드로 배치한다.
 // Camera는 외부(MultiViewportPanel)가 소유하고, 이 위젯은 포인터로 참조만 한다 (동기화 목적).
@@ -100,6 +124,12 @@ public:
     // 전부 이걸 통해서만 픽스맵을 얻도록 통일했다. non-const인 이유: grabFramebuffer()
     // 자체가 non-const(내부적으로 다시 그릴 수 있어서).
     QPixmap grabViewportPixmap();
+
+    // § CTP 캡처 이미지(2026-11-09) - 화면 밖 프레임버퍼에 sizePx 크기로 그린다(흰 배경, 인쇄용 색, 단면 캡,
+    // 치수선 여러 개 + 원형 라벨 + 보조선). 화면에 보이는 카메라/단면/마커는 건드리지 않는다. 그래픽 초기화 전
+    // (창이 한 번도 안 그려짐)이거나 모델이 비어 있으면 빈 이미지.
+    QImage RenderCtpImage(const CtpRenderView& view, const std::vector<CtpRenderDimension>& dims, const QSize& sizePx);
+    geometry::ModelHandle modelHandle() const { return handle_; }
 
     // § 캡쳐된 이미지 위 클릭 피킹(2026-09-11) - 캡쳐 시점의 카메라/뷰포트 상태를 그대로
     // 얼려서 들고 있다가, 나중에(캡쳐 이미지가 화면에 떠 있는 동안 사용자가 그 위를
@@ -193,6 +223,18 @@ protected:
     void enterEvent(QEnterEvent* event) override;
 
 private:
+    // § CTP 캡처 이미지 - paintGL과 RenderCtpImage가 함께 쓰는 모델 그리기(단면 캡 + 면 + 모서리)의 설정.
+    struct ModelPassStyle {
+        QVector3D fill;
+        QVector3D cap;
+        RenderMode renderMode = RenderMode::SolidEdge;
+        bool sectionEnabled = false;
+        int sectionAxis = 0;
+        float sectionCoord = 0.0f;
+        float sectionSign = 1.0f;
+    };
+    void DrawModelPasses(const QMatrix4x4& modelView, const QMatrix4x4& projection, const ModelPassStyle& style);
+
     // toggleSection/switchSectionAxis가 공유하는 "현재 마우스 위치 -> 월드 광선 -> bbox 교차점" 계산.
     bool computeSectionRay(QVector3D& outOrigin, QVector3D& outDir) const;
     // 중클릭 - 단면이 켜진 상태에서 클릭한 지점의 "현재 축" 좌표로 절단면 위치만 옮긴다

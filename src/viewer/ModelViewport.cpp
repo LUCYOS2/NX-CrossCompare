@@ -8,6 +8,8 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QMouseEvent>
+#include <QOpenGLFramebufferObject>
+#include <QOpenGLFramebufferObjectFormat>
 #include <QPainter>
 #include <QRect>
 #include <QRubberBand>
@@ -700,6 +702,106 @@ void ModelViewport::ResetLocalTransform() {
     localCamera_ = *sharedCamera_;
 }
 
+// § CTP 캡처 이미지(2026-11-09) - 화면 그리기(paintGL)와 고정 해상도 캡처(RenderCtpImage)가 같은 모델 그리기
+// (단면 캡 + 면 + 모서리)를 쓰도록 떼어 냈다. program_이 바인드된 상태에서 부르고, 끝나면 vao_가 바인드돼 있다.
+void ModelViewport::DrawModelPasses(const QMatrix4x4& modelView, const QMatrix4x4& projection, const ModelPassStyle& style) {
+    program_.setUniformValue("modelView", modelView);
+    program_.setUniformValue("projection", projection);
+    program_.setUniformValue("color", style.fill);
+    program_.setUniformValue("sectionEnabled", style.sectionEnabled);
+    program_.setUniformValue("sectionAxis", style.sectionAxis);
+    program_.setUniformValue("sectionCoord", style.sectionCoord);
+    program_.setUniformValue("sectionSign", style.sectionSign);
+    program_.setUniformValue("isCapPass", false);
+    program_.setUniformValue("capColor", style.cap); // 단면 캡 관례색(주황/붉은 계열)
+    program_.setUniformValue("isMarkerPass", false);
+    program_.setUniformValue("isLinePass", false);
+    program_.setUniformValue("isHoverFacePass", false);
+    program_.setUniformValue("pointSize", 0.0f);
+
+    vao_.bind();
+
+    if (style.sectionEnabled) {
+        // --- 1) 스텐실 집계 패스: 색/깊이 버퍼는 안 건드리고, "잘려나간(카메라 쪽)" 조각만
+        // 반대 부호로 그려서 앞/뒷면 통과 횟수 패리티를 stencil에 남긴다. 짝수(0)면 그
+        // 픽셀에서 절단면이 solid 바깥, 홀수(!=0)면 solid 내부를 지나간다는 뜻 -
+        // 이 판정이 곧 "단면 캡을 어디에 그릴지"가 된다.
+        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+        glDepthMask(GL_FALSE);
+        glDisable(GL_DEPTH_TEST);
+        glEnable(GL_STENCIL_TEST);
+        glClear(GL_STENCIL_BUFFER_BIT);
+        glStencilFunc(GL_ALWAYS, 0, 0xFF);
+
+        program_.setUniformValue("sectionSign", -style.sectionSign);
+
+        glEnable(GL_CULL_FACE);
+        glCullFace(GL_FRONT); // 뒷면만 그림
+        glStencilOp(GL_KEEP, GL_KEEP, GL_INCR_WRAP);
+        glDrawArrays(GL_TRIANGLES, 0, triangleVertexCount_);
+
+        glCullFace(GL_BACK); // 앞면만 그림
+        glStencilOp(GL_KEEP, GL_KEEP, GL_DECR_WRAP);
+        glDrawArrays(GL_TRIANGLES, 0, triangleVertexCount_);
+        glDisable(GL_CULL_FACE);
+
+        glEnable(GL_DEPTH_TEST);
+        glDepthMask(GL_TRUE);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        program_.setUniformValue("sectionSign", style.sectionSign);
+
+        // --- 2) 캡 사각형: 스텐실이 0이 아닌(=solid 내부) 픽셀에만 채워진다.
+        const geometry::BoundingBox box = adapter_->GetBoundingBox(handle_);
+        const auto capVerts = BuildCapQuad(style.sectionAxis, style.sectionCoord, box);
+        capVao_.bind();
+        capVbo_.bind();
+        capVbo_.allocate(capVerts.data(), static_cast<int>(capVerts.size() * sizeof(float)));
+
+        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
+        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
+        program_.setUniformValue("isCapPass", true);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+        program_.setUniformValue("isCapPass", false);
+
+        capVbo_.release();
+        capVao_.release();
+        vao_.bind();
+        glDisable(GL_STENCIL_TEST);
+    }
+
+    // --- 3) fill + wireframe 패스 (잘려나간 쪽은 그대로 discard). § 화면설정 - 화면 모드에
+    // 따라 둘 중 하나만 그리거나(Solid/Wireframe) 둘 다 그린다(SolidEdge, 기존 기본 동작).
+    const RenderMode renderMode = style.renderMode;
+
+    if (renderMode != RenderMode::Wireframe) {
+        // 1패스: 면 채우기(셰이딩). SolidEdge에서는 폴리곤 오프셋으로 살짝 뒤로 밀어
+        // 다음 엣지 패스가 z-fighting 없이 위에 겹쳐 보이게 한다.
+        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+        if (renderMode == RenderMode::SolidEdge) {
+            glEnable(GL_POLYGON_OFFSET_FILL);
+            glPolygonOffset(1.0f, 1.0f);
+        }
+        program_.setUniformValue("wireframe", false);
+        glDrawArrays(GL_TRIANGLES, 0, triangleVertexCount_);
+        if (renderMode == RenderMode::SolidEdge) {
+            glDisable(GL_POLYGON_OFFSET_FILL);
+        }
+    }
+
+    if (renderMode != RenderMode::Solid) {
+        // 2패스: 엣지 오버레이 - NX 경량화 표시의 "shaded + edges" 느낌을 재현.
+        // Wireframe 모드에서는 이 패스가 유일한 패스가 된다(면 채우기 없음).
+        // § 불필요한 선 정리(2026-09-11) - 예전엔 삼각형 전체를 GL_LINE 폴리곤 모드로
+        // 그려서 사각형 면을 쪼갠 대각선까지 다 보였다. 이제 실제 B-rep 엣지만 담은
+        // edgeVao_를 GL_LINES로 직접 그린다 - 폴리곤 모드 전환도 필요 없다.
+        program_.setUniformValue("wireframe", true);
+        edgeVao_.bind();
+        glDrawArrays(GL_LINES, 0, edgeVertexCount_);
+        edgeVao_.release();
+        vao_.bind(); // 다음 패스(마커 등)가 기대하는 VAO로 되돌려놓는다.
+    }
+}
+
 void ModelViewport::paintGL() {
     // § 치수선 중앙 라벨(2026-09-11) - Point(부위) 이니셜을 3D 장면 위에 텍스트로
     // 그리려면(지금까지 점/선 GL_POINTS/GL_LINES/GL_TRIANGLES로는 텍스트 자체를 못 그림)
@@ -731,103 +833,17 @@ void ModelViewport::paintGL() {
     const QMatrix4x4 modelView = ActiveTransform()->ViewMatrix();
 
     program_.bind();
-    program_.setUniformValue("modelView", modelView);
-    program_.setUniformValue("projection", projection);
-    program_.setUniformValue("color", QVector3D(0.55f, 0.72f, 0.85f));
     // 섹션 뷰는 회전/팬/줌(ActiveTransform)과 달리 독립 조작 모드에서도 항상 sharedCamera_
     // 기준 - 뷰포트마다 단면 위치가 따로 놀면 비교 목적에 안 맞는다.
-    program_.setUniformValue("sectionEnabled", sharedCamera_->sectionEnabled);
-    program_.setUniformValue("sectionAxis", sharedCamera_->sectionAxis);
-    program_.setUniformValue("sectionCoord", sharedCamera_->sectionCoord);
-    program_.setUniformValue("sectionSign", sharedCamera_->sectionSign);
-    program_.setUniformValue("isCapPass", false);
-    program_.setUniformValue("capColor", QVector3D(0.85f, 0.35f, 0.22f)); // 단면 캡 관례색(주황/붉은 계열)
-    program_.setUniformValue("isMarkerPass", false);
-    program_.setUniformValue("isLinePass", false);
-    program_.setUniformValue("isHoverFacePass", false);
-    program_.setUniformValue("pointSize", 0.0f);
-
-    vao_.bind();
-
-    if (sharedCamera_->sectionEnabled) {
-        // --- 1) 스텐실 집계 패스: 색/깊이 버퍼는 안 건드리고, "잘려나간(카메라 쪽)" 조각만
-        // 반대 부호로 그려서 앞/뒷면 통과 횟수 패리티를 stencil에 남긴다. 짝수(0)면 그
-        // 픽셀에서 절단면이 solid 바깥, 홀수(!=0)면 solid 내부를 지나간다는 뜻 -
-        // 이 판정이 곧 "단면 캡을 어디에 그릴지"가 된다.
-        glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-        glDepthMask(GL_FALSE);
-        glDisable(GL_DEPTH_TEST);
-        glEnable(GL_STENCIL_TEST);
-        glClear(GL_STENCIL_BUFFER_BIT);
-        glStencilFunc(GL_ALWAYS, 0, 0xFF);
-
-        program_.setUniformValue("sectionSign", -sharedCamera_->sectionSign);
-
-        glEnable(GL_CULL_FACE);
-        glCullFace(GL_FRONT); // 뒷면만 그림
-        glStencilOp(GL_KEEP, GL_KEEP, GL_INCR_WRAP);
-        glDrawArrays(GL_TRIANGLES, 0, triangleVertexCount_);
-
-        glCullFace(GL_BACK); // 앞면만 그림
-        glStencilOp(GL_KEEP, GL_KEEP, GL_DECR_WRAP);
-        glDrawArrays(GL_TRIANGLES, 0, triangleVertexCount_);
-        glDisable(GL_CULL_FACE);
-
-        glEnable(GL_DEPTH_TEST);
-        glDepthMask(GL_TRUE);
-        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        program_.setUniformValue("sectionSign", sharedCamera_->sectionSign);
-
-        // --- 2) 캡 사각형: 스텐실이 0이 아닌(=solid 내부) 픽셀에만 채워진다.
-        const geometry::BoundingBox box = adapter_->GetBoundingBox(handle_);
-        const auto capVerts = BuildCapQuad(sharedCamera_->sectionAxis, sharedCamera_->sectionCoord, box);
-        capVao_.bind();
-        capVbo_.bind();
-        capVbo_.allocate(capVerts.data(), static_cast<int>(capVerts.size() * sizeof(float)));
-
-        glStencilFunc(GL_NOTEQUAL, 0, 0xFF);
-        glStencilOp(GL_KEEP, GL_KEEP, GL_KEEP);
-        program_.setUniformValue("isCapPass", true);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
-        program_.setUniformValue("isCapPass", false);
-
-        capVbo_.release();
-        capVao_.release();
-        vao_.bind();
-        glDisable(GL_STENCIL_TEST);
-    }
-
-    // --- 3) fill + wireframe 패스 (잘려나간 쪽은 그대로 discard). § 화면설정 - 화면 모드에
-    // 따라 둘 중 하나만 그리거나(Solid/Wireframe) 둘 다 그린다(SolidEdge, 기존 기본 동작).
-    const RenderMode renderMode = sharedCamera_->renderMode;
-
-    if (renderMode != RenderMode::Wireframe) {
-        // 1패스: 면 채우기(셰이딩). SolidEdge에서는 폴리곤 오프셋으로 살짝 뒤로 밀어
-        // 다음 엣지 패스가 z-fighting 없이 위에 겹쳐 보이게 한다.
-        glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
-        if (renderMode == RenderMode::SolidEdge) {
-            glEnable(GL_POLYGON_OFFSET_FILL);
-            glPolygonOffset(1.0f, 1.0f);
-        }
-        program_.setUniformValue("wireframe", false);
-        glDrawArrays(GL_TRIANGLES, 0, triangleVertexCount_);
-        if (renderMode == RenderMode::SolidEdge) {
-            glDisable(GL_POLYGON_OFFSET_FILL);
-        }
-    }
-
-    if (renderMode != RenderMode::Solid) {
-        // 2패스: 엣지 오버레이 - NX 경량화 표시의 "shaded + edges" 느낌을 재현.
-        // Wireframe 모드에서는 이 패스가 유일한 패스가 된다(면 채우기 없음).
-        // § 불필요한 선 정리(2026-09-11) - 예전엔 삼각형 전체를 GL_LINE 폴리곤 모드로
-        // 그려서 사각형 면을 쪼갠 대각선까지 다 보였다. 이제 실제 B-rep 엣지만 담은
-        // edgeVao_를 GL_LINES로 직접 그린다 - 폴리곤 모드 전환도 필요 없다.
-        program_.setUniformValue("wireframe", true);
-        edgeVao_.bind();
-        glDrawArrays(GL_LINES, 0, edgeVertexCount_);
-        edgeVao_.release();
-        vao_.bind(); // 다음 패스(마커 등)가 기대하는 VAO로 되돌려놓는다.
-    }
+    ModelPassStyle style;
+    style.fill = QVector3D(0.55f, 0.72f, 0.85f);
+    style.cap = QVector3D(0.85f, 0.35f, 0.22f); // 단면 캡 관례색(주황/붉은 계열)
+    style.renderMode = sharedCamera_->renderMode;
+    style.sectionEnabled = sharedCamera_->sectionEnabled;
+    style.sectionAxis = sharedCamera_->sectionAxis;
+    style.sectionCoord = sharedCamera_->sectionCoord;
+    style.sectionSign = sharedCamera_->sectionSign;
+    DrawModelPasses(modelView, projection, style);
 
     // --- 4) CTQ 치수선 - § 치수 표시선(2026-09-11). "측정 포인트가 생기면 그 기준으로
     // 치수 표시선도 같이 생겼으면 좋겠다"는 요청 - 포인트 2개를 잇는 선을 캡쳐 이미지에
@@ -1456,6 +1472,156 @@ QPixmap ModelViewport::grabViewportPixmap() {
     QImage image = grabFramebuffer();
     image.setDevicePixelRatio(devicePixelRatioF());
     return QPixmap::fromImage(image);
+}
+
+namespace {
+// § CTP 캡처 이미지 - 치수선 화살촉(끝점 tip, 화살이 향하는 방향 dir = 단위벡터).
+void DrawArrowHead(QPainter& p, const QPointF& tip, const QPointF& dir, double length, double halfWidth) {
+    const QPointF normal(-dir.y(), dir.x());
+    const QPointF base = tip - dir * length;
+    const QPointF tri[3] = {tip, base + normal * halfWidth, base - normal * halfWidth};
+    p.drawPolygon(tri, 3);
+}
+} // namespace
+
+QImage ModelViewport::RenderCtpImage(const CtpRenderView& view, const std::vector<CtpRenderDimension>& dims,
+                                     const QSize& sizePx) {
+    if (!glReady_ || sizePx.isEmpty() || triangleVertexCount_ == 0) {
+        return QImage();
+    }
+    makeCurrent();
+
+    // 4배 다중 샘플(계단 현상 줄이기) - 드라이버가 못 만들면 샘플 없이 다시 만든다.
+    QOpenGLFramebufferObjectFormat format;
+    format.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
+    format.setSamples(4);
+    auto fbo = std::make_unique<QOpenGLFramebufferObject>(sizePx, format);
+    if (!fbo->isValid()) {
+        format.setSamples(0);
+        fbo = std::make_unique<QOpenGLFramebufferObject>(sizePx, format);
+    }
+    if (!fbo->isValid()) {
+        diag::Log("[CTP 캡처] 화면 밖 그리기 버퍼를 만들지 못했습니다.");
+        doneCurrent();
+        return QImage();
+    }
+
+    GLint oldViewport[4] = {0, 0, 0, 0};
+    glGetIntegerv(GL_VIEWPORT, oldViewport);
+    fbo->bind();
+    glViewport(0, 0, sizePx.width(), sizePx.height());
+    glEnable(GL_DEPTH_TEST);
+    glClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+
+    // 직교 투영: 카메라를 모델 전체보다 멀리 두고, 앞/뒤 자르는 면은 모델 범위로 잡는다(작은 형상을 크게 확대해도
+    // 모델 앞부분이 잘려 나가지 않게 - 화면용 BuildProjectionMatrix는 거리 기준이라 이 용도에 안 맞는다).
+    const geometry::BoundingBox box = adapter_->GetBoundingBox(handle_);
+    const float diag = std::max(1.0f, static_cast<float>(std::sqrt(std::pow(box.max.x - box.min.x, 2.0) +
+                                                                   std::pow(box.max.y - box.min.y, 2.0) +
+                                                                   std::pow(box.max.z - box.min.z, 2.0))));
+    const QVector3D boxCenter(static_cast<float>((box.min.x + box.max.x) * 0.5),
+                              static_cast<float>((box.min.y + box.max.y) * 0.5),
+                              static_cast<float>((box.min.z + box.max.z) * 0.5));
+    const QVector3D dir = view.viewDir.normalized();
+    const float centerOffset = (view.center - boxCenter).length();
+    const float distance = diag * 1.5f + centerOffset;
+    const QVector3D eye = view.center - dir * distance;
+    QMatrix4x4 modelView;
+    modelView.lookAt(eye, view.center, view.up);
+    QMatrix4x4 projection;
+    const float reach = diag * 0.6f + centerOffset;
+    projection.ortho(-view.halfWidth, view.halfWidth, -view.halfHeight, view.halfHeight,
+                     std::max(0.1f, distance - reach), distance + reach);
+
+    program_.bind();
+    ModelPassStyle style;
+    style.fill = QVector3D(0.86f, 0.88f, 0.92f);  // 인쇄용 옅은 회청색 - 모서리(검정)와 치수선(빨강)이 잘 보이게
+    style.cap = QVector3D(0.60f, 0.66f, 0.76f);   // 단면은 한 톤 진하게
+    style.renderMode = RenderMode::SolidEdge;
+    style.sectionEnabled = view.sectionEnabled;
+    style.sectionAxis = view.sectionAxis;
+    style.sectionCoord = view.sectionCoord;
+    style.sectionSign = view.sectionSign;
+    DrawModelPasses(modelView, projection, style);
+    vao_.release();
+    program_.release();
+    glDisable(GL_DEPTH_TEST);
+
+    // 다중 샘플 버퍼면 toImage()가 일반 버퍼로 풀어서 읽는다.
+    QImage image = fbo->toImage().convertToFormat(QImage::Format_ARGB32_Premultiplied);
+    fbo->release();
+    fbo.reset();
+    glViewport(oldViewport[0], oldViewport[1], oldViewport[2], oldViewport[3]);
+    doneCurrent();
+    update();
+
+    // ---- 2D 덧그리기: 보조선 -> 치수선/화살촉 -> 라벨 원 ----
+    const QMatrix4x4 viewProj = projection * modelView;
+    const double w = sizePx.width();
+    const double h = sizePx.height();
+    auto toPixel = [&](const QVector3D& p) {
+        const QVector3D ndc = viewProj.map(p); // 직교 투영이라 w=1
+        return QPointF((ndc.x() * 0.5 + 0.5) * w, (1.0 - (ndc.y() * 0.5 + 0.5)) * h);
+    };
+    const double s = std::max(0.5, h / 500.0); // 선 굵기/글자 크기 배율(높이 500px 기준)
+    const QColor dimColor(200, 0, 0);
+    const double arrowLen = 11.0 * s;
+    const double arrowHalf = 3.6 * s;
+    const double labelR = 12.0 * s;
+
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    for (const auto& d : dims) {
+        const QPointF mA = toPixel(d.measureA);
+        const QPointF mB = toPixel(d.measureB);
+        const QPointF lA = toPixel(d.lineA);
+        const QPointF lB = toPixel(d.lineB);
+        // 보조선: 측정점 -> 치수선, 치수선 너머로 조금 더.
+        painter.setPen(QPen(QColor(90, 90, 90), 1.0 * s));
+        for (const auto& [from, to] : {std::pair{mA, lA}, std::pair{mB, lB}}) {
+            const QPointF v = to - from;
+            const double len = std::hypot(v.x(), v.y());
+            if (len > 1.0) {
+                painter.drawLine(from, to + v / len * (4.0 * s));
+            }
+        }
+        // 치수선 + 화살촉. 짧으면 화살을 바깥에서 안쪽으로 겨눈다.
+        const QPointF v = lB - lA;
+        const double len = std::hypot(v.x(), v.y());
+        if (len < 1e-3) {
+            continue;
+        }
+        const QPointF u = v / len;
+        painter.setPen(QPen(dimColor, 1.6 * s));
+        painter.setBrush(dimColor);
+        const bool inside = len > arrowLen * 2.6;
+        if (inside) {
+            painter.drawLine(lA, lB);
+            DrawArrowHead(painter, lA, -u, arrowLen, arrowHalf);
+            DrawArrowHead(painter, lB, u, arrowLen, arrowHalf);
+        } else {
+            const double tail = arrowLen * 1.8;
+            painter.drawLine(lA - u * tail, lB + u * tail);
+            DrawArrowHead(painter, lA, u, arrowLen, arrowHalf);
+            DrawArrowHead(painter, lB, -u, arrowLen, arrowHalf);
+        }
+        // 라벨 원: 가운데에 둘 자리가 없으면 B 쪽 끝 너머에 둔다.
+        const bool roomInMiddle = len > labelR * 2.0 + arrowLen * 2.4;
+        const QPointF labelPos = roomInMiddle ? (lA + lB) / 2.0 : lB + u * (arrowLen * 1.8 + labelR + 3.0 * s);
+        painter.setPen(QPen(dimColor, 1.6 * s));
+        painter.setBrush(Qt::white);
+        painter.drawEllipse(labelPos, labelR, labelR);
+        QFont font = painter.font();
+        font.setBold(true);
+        font.setPixelSize(std::max(8, static_cast<int>(labelR * 1.25)));
+        painter.setFont(font);
+        painter.setPen(dimColor);
+        painter.drawText(QRectF(labelPos.x() - labelR, labelPos.y() - labelR, labelR * 2, labelR * 2), Qt::AlignCenter,
+                         d.label);
+    }
+    painter.end();
+    return image;
 }
 
 void ModelViewport::ApplyLeftDrag(Camera* transform, const QPoint& delta) const {

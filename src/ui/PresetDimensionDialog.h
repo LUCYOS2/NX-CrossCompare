@@ -6,6 +6,7 @@
 #include "geometry/IGeometryAdapter.h"
 #include "rule/PresetDimensions.h"
 
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -45,6 +46,9 @@ private:
     void RefreshPreview();
     void OnCheckAllInches();
     void OnSaveClicked();
+    // § CTP 캡처 이미지(2026-11-09) - 체크한 후보(최대 4개)에 A~D 라벨을 붙여 자동 구도로 그리고 미리보기 후 저장.
+    // 저장하면 그 행들을 규칙으로 저장할 때 Point 라벨(ctqCode)과 이미지 경로가 같이 들어간다.
+    void OnMakeCtpImage();
     // 체크 여부와 무관하게 row 후보를 저장될 모양 그대로(기준 인치 주변 지문까지) 만든다.
     rule::Rule BuildRule(int row) const;
     std::string ChooseOffsetAxis(int measuredAxis) const;
@@ -62,6 +66,9 @@ private:
     std::vector<geometry::PatchCandidate> shapes_;
     std::vector<rule::PresetDimensionCandidate> candidates_;
     int savedRuleCount_ = 0;
+    // 마지막으로 저장한 CTP 이미지 - 행 번호 -> 라벨. 형상을 바꾸면 비운다(행 번호가 다른 후보를 가리키게 되므로).
+    std::map<int, std::string> ctpLabelsByRow_;
+    std::string ctpImagePath_;
 
     viewer::MultiViewportPanel* viewerPanel_ = nullptr;
     QComboBox* shapeCombo_ = nullptr;
@@ -70,6 +77,7 @@ private:
     QDoubleSpinBox* toleranceMinus_ = nullptr;
     QPushButton* checkAllInchesButton_ = nullptr;
     QPushButton* saveButton_ = nullptr;
+    QPushButton* ctpImageButton_ = nullptr;
     QLabel* statusLabel_ = nullptr;
 };
 

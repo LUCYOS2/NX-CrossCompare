@@ -727,6 +727,16 @@ void MultiViewportPanel::fitToView() {
     fitToBox(unionBoxOfHandles());
 }
 
+QImage MultiViewportPanel::RenderCtpImage(geometry::ModelHandle handle, const CtpRenderView& view,
+                                          const std::vector<CtpRenderDimension>& dims, const QSize& sizePx) {
+    for (ModelViewport* viewport : viewports_) {
+        if (viewport && viewport->modelHandle() == handle) {
+            return viewport->RenderCtpImage(view, dims, sizePx);
+        }
+    }
+    return QImage();
+}
+
 void MultiViewportPanel::fitToBox(const geometry::BoundingBox& unionBox) {
     const QVector3D center(static_cast<float>((unionBox.min.x + unionBox.max.x) * 0.5),
                             static_cast<float>((unionBox.min.y + unionBox.max.y) * 0.5),

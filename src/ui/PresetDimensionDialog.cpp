@@ -1,6 +1,8 @@
 #include "ui/PresetDimensionDialog.h"
 
+#include "rule/CtpCapture.h"
 #include "rule/RuleEngine.h"
+#include "ui/CtpImage.h"
 #include "viewer/DiagnosticsLog.h"
 #include "viewer/MultiViewportPanel.h"
 
@@ -9,7 +11,10 @@
 #include <QColor>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QDoubleSpinBox>
+#include <QFrame>
+#include <QPixmap>
 #include <QElapsedTimer>
 #include <QHBoxLayout>
 #include <QHeaderView>
@@ -182,8 +187,13 @@ PresetDimensionDialog::PresetDimensionDialog(
     connect(checkAllInchesButton_, &QPushButton::clicked, this, &PresetDimensionDialog::OnCheckAllInches);
     saveButton_ = new QPushButton("체크한 항목을 규칙으로 저장", this);
     connect(saveButton_, &QPushButton::clicked, this, &PresetDimensionDialog::OnSaveClicked);
+    ctpImageButton_ = new QPushButton("CTP 이미지 만들기", this);
+    ctpImageButton_->setToolTip("체크한 항목(최대 4개)에 A~D 라벨을 붙여, 시선/단면/확대를 자동으로 잡은 CTP 양식용 그림을 "
+                                "만듭니다.");
+    connect(ctpImageButton_, &QPushButton::clicked, this, &PresetDimensionDialog::OnMakeCtpImage);
     auto* actionRow = new QHBoxLayout();
     actionRow->addWidget(checkAllInchesButton_);
+    actionRow->addWidget(ctpImageButton_);
     actionRow->addStretch(1);
     actionRow->addWidget(saveButton_);
 
@@ -253,6 +263,7 @@ PresetDimensionDialog::PresetDimensionDialog(
                                   : "대표 인치 모델에서 이 프리셋과 비슷한 형상을 찾지 못했습니다.");
         checkAllInchesButton_->setEnabled(false);
         saveButton_->setEnabled(false);
+        ctpImageButton_->setEnabled(false);
         focusButton->setEnabled(false);
     } else {
         OnShapeChanged();
@@ -267,6 +278,8 @@ PresetDimensionDialog::PresetDimensionDialog(
 
 void PresetDimensionDialog::OnShapeChanged() {
     candidates_.clear();
+    ctpLabelsByRow_.clear();
+    ctpImagePath_.clear();
     const int index = shapeCombo_->currentIndex();
     if (index >= 0 && index < static_cast<int>(shapes_.size())) {
         candidates_ =
@@ -504,6 +517,11 @@ void PresetDimensionDialog::OnSaveClicked() {
     QString error;
     for (int row : rows) {
         rule::Rule r = BuildRule(row);
+        // CTP 이미지에 들어간 행이면 그 라벨(Point)과 이미지를 같이 저장한다.
+        if (const auto it = ctpLabelsByRow_.find(row); it != ctpLabelsByRow_.end() && !ctpImagePath_.empty()) {
+            r.ctqCode = it->second;
+            r.imagePath = ctpImagePath_;
+        }
         // 같은 이름이 이미 있으면 번호를 붙인다(규칙 목록에서 구분이 안 되므로).
         const std::string base = r.name;
         for (int n = 2; names.count(r.name) > 0; ++n) {
@@ -528,6 +546,102 @@ void PresetDimensionDialog::OnSaveClicked() {
                              QString("규칙 %1개를 저장했습니다. 규칙 목록에서 하나씩 열어 Point(부위)/도면 스펙을 채우세요.")
                                  .arg(saved));
     accept();
+}
+
+void PresetDimensionDialog::OnMakeCtpImage() {
+    const int shapeIndex = shapeCombo_->currentIndex();
+    if (shapeIndex < 0 || shapeIndex >= static_cast<int>(shapes_.size())) {
+        return;
+    }
+    std::vector<int> rows;
+    for (int row = 0; row < table_->rowCount(); ++row) {
+        if (table_->item(row, 0) && table_->item(row, 0)->checkState() == Qt::Checked) {
+            rows.push_back(row);
+        }
+    }
+    if (rows.empty()) {
+        QMessageBox::information(this, "CTP 이미지", "그림에 넣을 치수 후보를 체크하세요(한 장에 최대 4개).");
+        return;
+    }
+    if (rows.size() > 4) {
+        QMessageBox::information(this, "CTP 이미지",
+                                 QString("CTP 한 페이지에는 치수가 최대 4개입니다. 지금 %1개가 체크돼 있습니다 - 4개 이하로 "
+                                         "골라 주세요.")
+                                     .arg(rows.size()));
+        return;
+    }
+
+    std::map<int, std::string> labels;
+    std::vector<rule::CtpDimensionInput> dims;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const std::string label(1, static_cast<char>('A' + i));
+        labels[rows[i]] = label;
+        dims.push_back(rule::MakeCtpDimension(candidates_[static_cast<size_t>(rows[i])], label));
+    }
+    int inchCount = 0;
+    for (const auto& model : models_) {
+        inchCount += InchFromLabel(model.first) > 0 ? 1 : 0;
+    }
+    const auto& shape = shapes_[static_cast<size_t>(shapeIndex)];
+    const double aspect = rule::CtpImageAspect(static_cast<int>(dims.size()), inchCount > 0 ? inchCount : 5);
+    const rule::CtpCapturePlan plan = rule::PlanCtpCapture(dims, shape.box, shape.planes, aspect);
+
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    const QImage image = RenderCtpPlan(viewerPanel_, targetHandle_, plan);
+    QApplication::restoreOverrideCursor();
+    if (image.isNull()) {
+        QMessageBox::warning(this, "CTP 이미지", "그림을 만들지 못했습니다(그래픽 초기화 전이거나 화면 밖 그리기 실패). "
+                                                 "뷰어가 한 번 그려진 뒤 다시 눌러 주세요.");
+        return;
+    }
+    viewer::diag::Log(QString("[CTP 캡처] 치수 %1개, 시선 축 %2, 이미지 %3x%4")
+                          .arg(dims.size())
+                          .arg(QString::fromStdString(rule::AxisName(plan.view.viewAxis)))
+                          .arg(image.width())
+                          .arg(image.height()));
+
+    // 미리보기: 화면에 맞게 줄여 보여 주고, 저장을 누르면 rule_images에 PNG로 남긴다.
+    QDialog preview(this);
+    preview.setWindowTitle("CTP 이미지 미리보기");
+    auto* imageLabel = new QLabel(&preview);
+    const QSize maxSize(1100, 650);
+    imageLabel->setPixmap(QPixmap::fromImage(image).scaled(maxSize, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    imageLabel->setFrameShape(QFrame::Box);
+    QStringList lines;
+    for (size_t i = 0; i < rows.size(); ++i) {
+        const int row = rows[i];
+        lines << QString("%1 = %2 (%3 mm)")
+                     .arg(QString::fromStdString(labels[row]))
+                     .arg(table_->item(row, 0)->text())
+                     .arg(candidates_[static_cast<size_t>(row)].valueMm, 0, 'f', 2);
+    }
+    auto* info = new QLabel(lines.join("\n") + (plan.warning.empty()
+                                                    ? QString()
+                                                    : "\n\n" + QString::fromStdString(plan.warning)),
+                            &preview);
+    info->setWordWrap(true);
+    auto* buttons = new QDialogButtonBox(&preview);
+    buttons->addButton("저장 (규칙 저장 시 함께 연결)", QDialogButtonBox::AcceptRole);
+    buttons->addButton(QDialogButtonBox::Cancel);
+    connect(buttons, &QDialogButtonBox::accepted, &preview, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &preview, &QDialog::reject);
+    auto* layout = new QVBoxLayout(&preview);
+    layout->addWidget(imageLabel, 1);
+    layout->addWidget(info);
+    layout->addWidget(buttons);
+    if (preview.exec() != QDialog::Accepted) {
+        return;
+    }
+    const QString path = SaveCtpImage(image);
+    if (path.isEmpty()) {
+        QMessageBox::warning(this, "CTP 이미지", "이미지를 저장하지 못했습니다(rule_images 폴더 확인).");
+        return;
+    }
+    ctpLabelsByRow_ = labels;
+    ctpImagePath_ = path.toStdString();
+    statusLabel_->setText(QString("CTP 이미지 저장: %1 - \"체크한 항목을 규칙으로 저장\"하면 라벨(A~)과 이미지가 규칙에 "
+                                  "같이 들어갑니다.")
+                              .arg(QDir::toNativeSeparators(path)));
 }
 
 } // namespace ui

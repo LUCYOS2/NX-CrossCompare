@@ -145,6 +145,11 @@ public:
     // 계산을 모델 전체 대신 이 범위로). 후크처럼 제품 대비 작은 형상을 바로 보여주는 데 쓴다.
     void fitToBox(const geometry::BoundingBox& box);
 
+    // § CTP 캡처 이미지(2026-11-09) - handle 모델의 뷰포트로 화면 밖에 정해진 구도·크기로 그린다
+    // (ModelViewport::RenderCtpImage). 그 모델 뷰포트가 없거나 아직 한 번도 안 그려졌으면 빈 이미지.
+    QImage RenderCtpImage(geometry::ModelHandle handle, const CtpRenderView& view,
+                          const std::vector<CtpRenderDimension>& dims, const QSize& sizePx);
+
     // § 카메라 회전 시 치수선 축 자동 재선택(2026-09-13) - RuleEditorDialog가 현재 카메라
     // 각도를 알아야 "화면에 더 잘 보이는 축"을 다시 고를 수 있다. 읽기 전용으로만 노출.
     const Camera& sharedCamera() const { return camera_; }

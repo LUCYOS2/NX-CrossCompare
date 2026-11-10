@@ -13,6 +13,8 @@ add_library(ui STATIC
     MatchingDiagnosticsDialog.cpp
     ViewerDiagnosticsDialog.h
     ViewerDiagnosticsDialog.cpp
+    CtpImage.h
+    CtpImage.cpp
 )
 
 target_link_libraries(ui PUBLIC Qt6::Widgets viewer rule export_lib database)

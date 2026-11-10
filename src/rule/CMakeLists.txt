@@ -17,6 +17,8 @@ add_library(rule STATIC
     BuiltInCatalog.cpp
     PresetDimensions.h
     PresetDimensions.cpp
+    CtpCapture.h
+    CtpCapture.cpp
 )
 
 target_link_libraries(rule PUBLIC geometry)
